@@ -1,7 +1,13 @@
 """
-nail_measurer.py  ·  v3  ·  Fully Automatic
+nail_measurer.py  ·  v4  ·  Fully Automatic
 --------------------------------------------
 Measures all 5 fingernails from a single top-down photo with an ArUco marker.
+
+What's new in v4
+----------------
+  • Width:  row-scan 92nd-percentile (stable plate width, not bounding-box shrinkage)
+  • Length: positive Sobel cuticle detection (finds the nail-plate bottom edge)
+  • Polygon: built from actual left/right skin edges, not Canny fill
 
 Requirements
 ------------
@@ -11,12 +17,12 @@ Usage
 -----
   python nail_measurer.py --image hand.jpg --aruco-size 20 --output results/
 
-Photography tips for best results
-----------------------------------
-  ✅ Use a DARK background (navy, black, dark green)
+Photography tips
+----------------
+  ✅ Dark background (navy, black, dark green) — critical for hand segmentation
   ✅ Shoot straight down from ~35 cm
-  ✅ All 5 fingers flat and fully in frame
-  ✅ Marker on same surface next to the hand
+  ✅ All 5 fingers flat and fully in frame, fingers pointing upward
+  ✅ ArUco marker printed at known size, on the same surface next to the hand
   ✅ Even diffuse lighting, no harsh shadows
 """
 
@@ -33,7 +39,7 @@ from scipy.signal import find_peaks
 
 
 # ─────────────────────────────────────────────────────────────
-# ArUco detection
+# 1.  ArUco scale detection
 # ─────────────────────────────────────────────────────────────
 
 ARUCO_DICTS = {
@@ -47,299 +53,277 @@ ARUCO_DICTS = {
 
 
 def detect_aruco(image: np.ndarray, aruco_size_mm: float):
-    """Returns (mm_per_pixel, corners_4x2, marker_id). Raises RuntimeError if not found."""
+    """
+    Try every common ArUco dictionary and return (mm_per_pixel, corners, id).
+    Raises RuntimeError if no marker is found.
+    """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     for name, did in ARUCO_DICTS.items():
         d   = cv2.aruco.getPredefinedDictionary(did)
         det = cv2.aruco.ArucoDetector(d, cv2.aruco.DetectorParameters())
         corners, ids, _ = det.detectMarkers(gray)
         if ids is not None and len(ids) > 0:
-            c    = corners[0][0]
-            sides = [np.linalg.norm(c[i] - c[(i+1)%4]) for i in range(4)]
-            avg  = float(np.mean(sides))
-            mpp  = aruco_size_mm / avg
-            print(f"  [ArUco] dict={name}  id={ids[0][0]}  {mpp:.5f} mm/px")
+            c     = corners[0][0]
+            sides = [np.linalg.norm(c[i] - c[(i+1) % 4]) for i in range(4)]
+            avg   = float(np.mean(sides))
+            mpp   = aruco_size_mm / avg
+            print(f"  [ArUco] dict={name}  id={int(ids[0][0])}  "
+                  f"avg_side={avg:.1f}px  →  {mpp:.5f} mm/px")
             return mpp, c, int(ids[0][0])
     raise RuntimeError(
         "ArUco marker not detected.\n"
-        "  → Make sure the marker is fully visible, sharp, and well-lit.\n"
-        "  → Try printing a new marker with generate_aruco.py"
+        "  → Ensure the marker is fully visible, sharp, and well-lit.\n"
+        "  → Generate a fresh marker with: python generate_aruco.py"
     )
 
 
 # ─────────────────────────────────────────────────────────────
-# Hand segmentation
+# 2.  Hand segmentation (brightness-based, dark background)
 # ─────────────────────────────────────────────────────────────
 
-def build_hand_mask(image: np.ndarray, l_threshold: int = 120) -> tuple[np.ndarray, np.ndarray]:
+def build_hand_mask(image: np.ndarray) -> tuple:
     """
-    Segment the hand from the background using brightness in Lab space.
-    Works best with a DARK background (L < 100) and normal skin (L > 130).
-
-    Returns (hand_mask, hand_contour).
+    Segment hand from a dark background using the L channel of Lab colour space.
+    Skin (L > 120) is much brighter than a dark navy/black background (L < 100).
+    Returns (hand_mask uint8, bounding_rect (x,y,w,h)).
     """
-    lab  = cv2.cvtColor(image, cv2.COLOR_BGR2Lab)
-    L    = lab[:,:,0]
+    L = cv2.cvtColor(image, cv2.COLOR_BGR2Lab)[:, :, 0]
 
-    # Auto-tune the threshold: find the valley between dark bg and bright skin
-    hist = cv2.calcHist([L], [0], None, [256], [0,256]).flatten()
-    # Look for a threshold between 80 and 160
-    best_thresh = l_threshold
-    min_valley  = float('inf')
-    for t in range(80, 160):
-        valley = float(hist[t])
-        if valley < min_valley:
-            min_valley  = valley
-            best_thresh = t
-
-    # Use the auto-tuned threshold (but clamp it)
-    thresh = max(110, min(best_thresh, 160))
+    # Auto-tune threshold: valley between dark bg and bright skin
+    hist = cv2.calcHist([L], [0], None, [256], [0, 256]).flatten()
+    best_t, min_v = 120, float("inf")
+    for t in range(80, 165):
+        if hist[t] < min_v:
+            min_v, best_t = hist[t], t
+    thresh = max(110, min(best_t, 160))
 
     skin  = (L > thresh).astype(np.uint8) * 255
-    k9    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9,9))
-    k5    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
+    k9    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    k5    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     skin  = cv2.morphologyEx(skin, cv2.MORPH_CLOSE, k9, iterations=4)
     skin  = cv2.morphologyEx(skin, cv2.MORPH_OPEN,  k5, iterations=2)
 
     cnts, _ = cv2.findContours(skin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not cnts:
-        raise RuntimeError("No hand detected. Check lighting and background contrast.")
+        raise RuntimeError(
+            "No hand detected.\n"
+            "  → Use a darker background (navy, black, dark green).\n"
+            "  → Ensure the hand is well-lit and fully in frame."
+        )
 
-    # Hand = largest blob (exclude small noise)
-    h_cnt     = max(cnts, key=cv2.contourArea)
+    hand_cnt  = max(cnts, key=cv2.contourArea)
     hand_mask = np.zeros(image.shape[:2], np.uint8)
-    cv2.drawContours(hand_mask, [h_cnt], -1, 255, -1)
-    print(f"  [Hand] threshold=L>{thresh}  area={cv2.contourArea(h_cnt):.0f}px²")
-    return hand_mask, h_cnt
+    cv2.drawContours(hand_mask, [hand_cnt], -1, 255, -1)
+    bbox = cv2.boundingRect(hand_cnt)
+    print(f"  [Hand]  threshold L>{thresh}  area={cv2.contourArea(hand_cnt):.0f}px²")
+    return hand_mask, bbox
 
 
 # ─────────────────────────────────────────────────────────────
-# Fingertip detection
+# 3.  Fingertip detection
 # ─────────────────────────────────────────────────────────────
 
-def find_fingertips(hand_mask: np.ndarray) -> list[dict]:
+def find_fingertips(hand_mask: np.ndarray, bbox: tuple) -> list:
     """
-    Finds up to 5 fingertip x-positions by scanning the column-wise top profile.
-    Returns list of dicts with keys: tip_x, tip_y, left_x, right_x, f_top, f_bot
-    sorted left → right.
+    Scan each image column for the topmost skin pixel, smooth the profile,
+    then find up to 5 local minima (= fingertips).
+    Returns list of dicts: {tip_x, tip_y, left_x, right_x}.
     """
-    h_img, w_img = hand_mask.shape
-    hx, hy, hw, hh = cv2.boundingRect(
-        max(cv2.findContours(hand_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0],
-            key=cv2.contourArea))
+    hx, hy, hw, hh = bbox
+    h, w = hand_mask.shape
 
-    # Per-column topmost skin pixel
-    top_row = np.full(w_img, float(h_img))
-    for x in range(hx, hx+hw):
-        rows = np.where(hand_mask[:,x] > 0)[0]
+    top_row = np.full(w, float(h))
+    for x in range(hx, hx + hw):
+        rows = np.where(hand_mask[:, x] > 0)[0]
         if len(rows):
             top_row[x] = float(rows.min())
 
-    profile  = top_row[hx:hx+hw]
+    profile  = top_row[hx:hx + hw]
     smoothed = uniform_filter1d(profile, size=25)
 
-    # Local minima in y = local maxima in height = fingertips
     peaks, props = find_peaks(-smoothed, distance=55, prominence=8)
-
-    # Keep best 5 by prominence
     if len(peaks) > 5:
-        order = np.argsort(props['prominences'])[::-1][:5]
+        order = np.argsort(props["prominences"])[::-1][:5]
         peaks = np.sort(peaks[order])
 
     fingers = []
     for p_off in peaks:
         tip_x = int(p_off + hx)
         tip_y = int(smoothed[p_off])
+        valley_thresh = smoothed[p_off] + 35
 
-        # x-extent: walk left/right until profile rises ≥ 35px above the tip
-        threshold = smoothed[p_off] + 35
         lx = hx
-        for dx in range(int(p_off)-1, -1, -1):
-            if smoothed[dx] > threshold:
+        for dx in range(int(p_off) - 1, -1, -1):
+            if smoothed[dx] > valley_thresh:
                 lx = hx + dx
                 break
+
         rx = hx + hw
-        for dx in range(int(p_off)+1, len(smoothed)):
-            if smoothed[dx] > threshold:
+        for dx in range(int(p_off) + 1, len(smoothed)):
+            if smoothed[dx] > valley_thresh:
                 rx = hx + dx
                 break
 
-        # Full finger extent (top to bottom) within this x-strip
-        col_mask = hand_mask.copy()
-        col_mask[:, :lx]  = 0
-        col_mask[:, rx:]  = 0
-        f_rows = np.where(col_mask.sum(axis=1) > 0)[0]
-        if len(f_rows) == 0:
-            continue
-        fingers.append({
-            "tip_x": tip_x, "tip_y": tip_y,
-            "left_x": lx,   "right_x": rx,
-            "f_top": int(f_rows.min()), "f_bot": int(f_rows.max()),
-        })
+        fingers.append({"tip_x": tip_x, "tip_y": tip_y, "left_x": lx, "right_x": rx})
 
     return fingers
 
 
 # ─────────────────────────────────────────────────────────────
-# Nail segmentation within fingertip ROI
+# 4.  Per-nail measurement
 # ─────────────────────────────────────────────────────────────
 
-def segment_nail(image: np.ndarray, hand_mask: np.ndarray, finger: dict) -> np.ndarray | None:
+def measure_nail(hand_mask: np.ndarray, gray: np.ndarray,
+                 finger: dict, mpp: float, clahe) -> dict | None:
     """
-    Returns a nail contour (OpenCV format, image coordinates) for one finger.
-    Uses CLAHE + Canny inside the fingertip ROI, falling back to the full
-    fingertip mask if edge detection yields nothing useful.
+    Measure one nail using:
+      • Width  — 92nd-percentile of row-scan widths once the plate stabilises
+      • Length — tip-to-cuticle using positive Sobel (light→dark boundary)
+      • C-curve — PCA sagitta on the nail outline polygon
+    Returns a measurement dict, or None on failure.
     """
-    h_img, w_img = image.shape[:2]
-    lab   = cv2.cvtColor(image, cv2.COLOR_BGR2Lab)
-    L     = lab[:,:,0]
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4,4))
-
+    h, w   = hand_mask.shape
     tip_x  = finger["tip_x"]
-    lx, rx = finger["left_x"], finger["right_x"]
-    f_top  = finger["f_top"]
-    f_h    = finger["f_bot"] - f_top
+    tip_y  = finger["tip_y"]
+    lx     = finger["left_x"]
+    rx     = finger["right_x"]
 
-    # Nail region = top 30% of finger height
-    nail_bot = f_top + int(f_h * 0.30)
-    x1, x2  = max(0, lx), min(w_img, rx)
-    y1, y2  = max(0, f_top), min(h_img, nail_bot)
+    # ── 4a. Row-scan: widths + left/right edges ─────────────
+    widths, ledges, redges = [], [], []
+    for y in range(tip_y, tip_y + 400):
+        if y >= h:
+            break
+        cols = np.where(hand_mask[y, lx:rx] > 0)[0]
+        if len(cols) < 5:
+            break
+        widths.append(int(cols[-1] - cols[0]))
+        ledges.append(int(cols[0]  + lx))
+        redges.append(int(cols[-1] + lx))
 
-    if x2 - x1 < 5 or y2 - y1 < 5:
+    if len(widths) < 10:
         return None
 
-    # Hand mask restricted to nail ROI
-    nail_roi_mask = hand_mask[y1:y2, x1:x2]
+    ws  = uniform_filter1d(np.array(widths, float), size=7)
+    dW  = np.gradient(ws)
 
-    # CLAHE on L channel → Canny edges
-    L_crop   = L[y1:y2, x1:x2]
-    L_enh    = clahe.apply(L_crop)
-    edges    = cv2.Canny(L_enh, 18, 55)
+    # ── 4b. Plate start: where width growth slows ───────────
+    plate_start = 5
+    for i in range(5, len(dW)):
+        if abs(dW[i]) < 1.2:
+            plate_start = i
+            break
 
-    # Fill edges to closed nail shape
-    k5    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
-    filled = cv2.dilate(edges, k5, iterations=2)
-    filled = cv2.morphologyEx(filled, cv2.MORPH_CLOSE, k5, iterations=6)
-    filled = cv2.bitwise_and(filled, nail_roi_mask)
+    # ── 4c. TRUE WIDTH via 92nd-pct of stable region ────────
+    stable_ws = ws[plate_start : plate_start + 60]
+    width_px  = float(np.percentile(stable_ws, 92)) if len(stable_ws) > 5 else ws[plate_start]
 
-    cnts, _ = cv2.findContours(filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    good    = [c for c in cnts if cv2.contourArea(c) > 400]
+    # ── 4d. CUTICLE position via positive Sobel ─────────────
+    #  The cuticle shows as a light→dark transition (positive Sobel in y).
+    #  Search within the central nail-width band, 5–24 mm below tip.
+    hw_nail  = int(width_px * 0.42)
+    x1_      = max(0, tip_x - hw_nail)
+    x2_      = min(w, tip_x + hw_nail)
+    max_srch = min(int(24 / mpp), len(widths) - 1)
+    roi      = gray[tip_y : tip_y + max_srch, x1_ : x2_].copy()
+    roi_mask = hand_mask[tip_y : tip_y + max_srch, x1_ : x2_]
+    roi[roi_mask == 0] = 0
 
-    if good:
-        nail_cnt = max(good, key=cv2.contourArea)
+    enh  = clahe.apply(roi)
+    sob  = cv2.Sobel(enh.astype(float), cv2.CV_64F, 0, 1, ksize=5)
+    rstr = uniform_filter1d(np.maximum(sob, 0).sum(axis=1), size=5)
+
+    min_d    = max(int(5 / mpp), plate_start + 3)
+    prom_min = max(rstr[min_d:].max() * 0.18, 1.0) if len(rstr) > min_d else 1.0
+    pks, _   = find_peaks(rstr[min_d:], distance=8, prominence=prom_min)
+
+    if len(pks) > 0:
+        cuticle_y = tip_y + min_d + int(pks[0])
     else:
-        # Fallback: use the entire fingertip ROI mask
-        fb_cnts, _ = cv2.findContours(nail_roi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not fb_cnts:
-            return None
-        nail_cnt = max(fb_cnts, key=cv2.contourArea)
-        # Already in ROI coords — shift below
-    
-    # Shift contour from ROI coordinates to full image coordinates
-    shifted = nail_cnt.copy()
-    shifted[:,:,0] += x1
-    shifted[:,:,1] += y1
-    return shifted
+        cuticle_y = tip_y + int(13 / mpp)   # fallback ≈ 13 mm (short nail default)
 
+    cut_idx   = min(cuticle_y - tip_y, len(widths) - 1)
+    length_px = float(cuticle_y - tip_y)
 
-# ─────────────────────────────────────────────────────────────
-# Measurement
-# ─────────────────────────────────────────────────────────────
+    # ── 4e. Nail polygon from actual skin edges ──────────────
+    poly = ([[ledges[i], tip_y + i] for i in range(cut_idx + 1)] +
+            [[redges[i], tip_y + i] for i in reversed(range(cut_idx + 1))])
+    nail_polygon = np.array(poly, np.int32)
 
-def compute_measurements(nail_cnt: np.ndarray, mm_per_pixel: float) -> dict:
-    """Compute length, width, c-curve, arc radius from a nail contour."""
-    rect       = cv2.minAreaRect(nail_cnt)
-    bw_r, bh_r = sorted(rect[1])   # bw ≤ bh; bh = length axis
-
-    pts = nail_cnt[:,0,:].astype(float)
-    if len(pts) >= 6:
-        try:
-            tck, _ = splprep(
-                [np.append(pts[:,0], pts[0,0]),
-                 np.append(pts[:,1], pts[0,1])],
-                s=len(pts)*2, per=True)
-            xs, ys = splev(np.linspace(0,1,400), tck)
-            smooth = np.column_stack([xs,ys])
-        except Exception:
-            smooth = pts
-    else:
+    # ── 4f. C-curve via PCA sagitta ─────────────────────────
+    pts = nail_polygon.astype(float)
+    try:
+        tck, _ = splprep(
+            [np.append(pts[:, 0], pts[0, 0]),
+             np.append(pts[:, 1], pts[0, 1])],
+            s=len(pts) * 2, per=True)
+        xs, ys  = splev(np.linspace(0, 1, 400), tck)
+        smooth  = np.column_stack([xs, ys])
+    except Exception:
         smooth = pts
 
-    # C-curve via PCA on the smoothed contour
     mean = smooth.mean(0); cen = smooth - mean
     try:
-        _, evecs = np.linalg.eigh(np.cov(cen.T))
-        w_ax     = evecs[:,0]; proj = cen @ w_ax
-        pm       = smooth[np.argmin(proj)]; pm2 = smooth[np.argmax(proj)]
-        chord    = pm2 - pm; chord_len = float(np.linalg.norm(chord))
-        if chord_len > 0:
-            cu     = chord / chord_len
-            perp   = np.array([-cu[1], cu[0]])
-            dists  = (smooth - pm) @ perp
-            c_px   = float(max(dists.max(), -dists.min()))
+        _, ev  = np.linalg.eigh(np.cov(cen.T))
+        w_ax   = ev[:, 0]; proj = cen @ w_ax
+        pm     = smooth[np.argmin(proj)]; pm2 = smooth[np.argmax(proj)]
+        chord  = pm2 - pm; cl = float(np.linalg.norm(chord))
+        if cl > 0:
+            cu    = chord / cl
+            dists = (smooth - pm) @ np.array([-cu[1], cu[0]])
+            c_px  = float(max(dists.max(), -dists.min()))
         else:
-            c_px, chord_len = 0.0, 0.0
+            c_px, cl = 0.0, 0.0
     except Exception:
-        c_px, chord_len = 0.0, 0.0
+        c_px, cl = 0.0, 0.0
 
-    l_mm   = round(bh_r * mm_per_pixel, 2)
-    w_mm   = round(bw_r * mm_per_pixel, 2)
-    c_mm   = round(c_px * mm_per_pixel, 2)
-    arc_r  = round((chord_len**2/(8*c_px) + c_px/2) * mm_per_pixel, 2) if c_px > 1 else None
-    thick  = round(max(0.25, min(c_mm * 1.5, 0.85)), 2)
-    ar     = round(w_mm / l_mm, 3) if l_mm else 0.0
+    # ── 4g. Final mm values ──────────────────────────────────
+    w_mm  = round(width_px  * mpp, 2)
+    l_mm  = round(length_px * mpp, 2)
+    c_mm  = round(c_px      * mpp, 2)
+    arc_r = round((cl**2 / (8 * c_px) + c_px / 2) * mpp, 2) if c_px > 1 else None
+    thick = round(max(0.25, min(c_mm * 1.5, 0.85)), 2)
+    ar    = round(w_mm / l_mm, 3) if l_mm else 0.0
 
-    return dict(length_mm=l_mm, width_mm=w_mm, c_curve_mm=c_mm,
-                arc_radius_mm=arc_r, thickness_mm=thick, aspect_ratio=ar)
+    return dict(
+        width_mm=w_mm, length_mm=l_mm, c_curve_mm=c_mm,
+        arc_radius_mm=arc_r, thickness_mm=thick, aspect_ratio=ar,
+        _cuticle_y=cuticle_y, _width_px=width_px,
+        nail_polygon_px=nail_polygon.tolist(),
+    )
 
 
 # ─────────────────────────────────────────────────────────────
-# Finger naming
+# 5.  Finger naming
 # ─────────────────────────────────────────────────────────────
 
-def assign_finger_names(fingers: list[dict]) -> list[str]:
+def assign_names(fingers: list) -> list:
     """
-    Assign finger names based on x-position and relative tip height.
-    The thumb is usually an outlier: lower (larger tip_y) and may be on either edge.
-    Remaining fingers go pinky→ring→middle→index from left or right depending on hand.
+    Name the detected fingers.
+    Thumb = the one with the largest tip_y (lowest in image) among the two edge fingers.
+    Remaining 4 = pinky→ring→middle→index (or reversed) by x-position.
     """
-    if not fingers:
+    n = len(fingers)
+    if n == 0:
         return []
 
-    n = len(fingers)
-    # Sort by x
-    sorted_by_x = sorted(range(n), key=lambda i: fingers[i]["tip_x"])
+    by_x   = sorted(range(n), key=lambda i: fingers[i]["tip_x"])
+    edges  = [by_x[0], by_x[-1]]
+    thumb  = max(edges, key=lambda i: fingers[i]["tip_y"])
+    rest   = [i for i in by_x if i != thumb]
 
-    # Thumb heuristic: the one with the largest tip_y (lowest in image) among edge fingers
-    # Check leftmost and rightmost
-    edge_candidates = [sorted_by_x[0], sorted_by_x[-1]]
-    thumb_idx       = max(edge_candidates, key=lambda i: fingers[i]["tip_y"])
+    # Thumb on right → right hand palm-down → left-to-right: pinky,ring,middle,index
+    thumb_on_right = fingers[thumb]["tip_x"] > fingers[rest[len(rest)//2]]["tip_x"]
+    seq = ["pinky", "ring", "middle", "index"] if thumb_on_right else ["index", "middle", "ring", "pinky"]
 
-    # Remaining fingers sorted by x — assign pinky→ring→middle→index
-    rest = [i for i in sorted_by_x if i != thumb_idx]
-
-    # Determine hand side: if thumb is on the right → right hand (fingers go l→r: pinky,ring,mid,idx)
-    #                       if thumb is on the left  → left hand  (fingers go l→r: idx,mid,ring,pinky)
-    thumb_on_right = (fingers[thumb_idx]["tip_x"] > fingers[rest[len(rest)//2]]["tip_x"])
-
-    if thumb_on_right:  # right hand, palm down
-        names_for_rest = ["pinky","ring","middle","index"]
-    else:               # left hand, palm down
-        names_for_rest = ["index","middle","ring","pinky"]
-
-    result = [""] * n
-    result[thumb_idx] = "thumb"
+    names = [""] * n
+    names[thumb] = "thumb"
     for rank, fi in enumerate(rest):
-        if rank < len(names_for_rest):
-            result[fi] = names_for_rest[rank]
-        else:
-            result[fi] = f"finger_{rank}"
-
-    return result
+        names[fi] = seq[rank] if rank < len(seq) else f"finger_{rank}"
+    return names
 
 
 # ─────────────────────────────────────────────────────────────
-# Visualisation
+# 6.  Visualisation
 # ─────────────────────────────────────────────────────────────
 
 NAIL_COLORS = {
@@ -350,154 +334,164 @@ NAIL_COLORS = {
     "pinky":  ( 80, 200, 200),
 }
 
-def draw_results(image: np.ndarray, nail_results: list[dict],
+
+def draw_results(image: np.ndarray, results: list,
                  aruco_corners: np.ndarray, save_path: str) -> np.ndarray:
     vis = image.copy()
+    cv2.polylines(vis, [aruco_corners.astype(int)], True, (0, 255, 255), 2)
 
-    # ArUco outline
-    cv2.polylines(vis, [aruco_corners.astype(int)], True, (0,255,255), 2)
+    for r in results:
+        name = r["finger"]
+        col  = NAIL_COLORS.get(name, (200, 200, 200))
+        cnt  = np.array(r["nail_polygon_px"], np.int32).reshape(-1, 1, 2)
+        tx, ty = r["tip_x"], r["tip_y"]
 
-    for r in nail_results:
-        name  = r["finger"]
-        col   = NAIL_COLORS.get(name, (200,200,200))
-        cnt   = np.array(r["nail_polygon_px"], np.int32).reshape(-1,1,2)
-        tip_x = r["tip_x"]; tip_y = r["tip_y"]
-
-        # Semi-transparent fill
-        overlay = vis.copy()
-        cv2.fillPoly(overlay, [cnt], col)
-        cv2.addWeighted(overlay, 0.25, vis, 0.75, 0, vis)
+        # Semi-transparent nail fill
+        ov = vis.copy()
+        cv2.fillPoly(ov, [cnt], col)
+        cv2.addWeighted(ov, 0.25, vis, 0.75, 0, vis)
         cv2.polylines(vis, [cnt], True, col, 2)
 
-        # Bounding box
-        rect = cv2.minAreaRect(cnt)
-        box  = cv2.boxPoints(rect).astype(int)
-        cv2.drawContours(vis, [box], -1, (255,255,0), 1)
+        # Width bar (cyan) at plate level
+        hw = int(r["_width_px"] / 2)
+        plate_y   = ty + 22
+        cuticle_y = r["_cuticle_y"]
+        cv2.line(vis, (tx - hw, plate_y),   (tx + hw, plate_y),   (0, 230, 230), 2)
+        cv2.line(vis, (tx - hw, cuticle_y), (tx + hw, cuticle_y), (0, 230, 230), 2)
 
         # Labels
-        labels = [
-            name.upper(),
-            f"L: {r['length_mm']} mm",
-            f"W: {r['width_mm']} mm",
-            f"C: {r['c_curve_mm']} mm",
-        ]
-        for j, txt in enumerate(labels):
-            dy = -55 + j*16
-            cv2.putText(vis, txt, (tip_x-40, tip_y+dy),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0,0,0), 3)
-            cv2.putText(vis, txt, (tip_x-40, tip_y+dy),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1)
+        for txt, dy in [(name.upper(), -56),
+                        (f"W: {r['width_mm']} mm",  -40),
+                        (f"L: {r['length_mm']} mm", -24),
+                        (f"C: {r['c_curve_mm']} mm",  -8)]:
+            cv2.putText(vis, txt, (tx - 40, ty + dy),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0,  0,  0), 3)
+            cv2.putText(vis, txt, (tx - 40, ty + dy),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, col,          1)
 
     if save_path:
         cv2.imwrite(save_path, vis)
     return vis
 
 
-def print_table(nail_results: list[dict]):
-    h = f"{'Finger':<8} {'Length':>9} {'Width':>8} {'C-curve':>9} {'ArcR':>8} {'Thick':>7} {'AR':>6}"
-    print("\n" + "="*60)
-    print(h)
-    print("-"*60)
-    for r in sorted(nail_results, key=lambda x: x["finger_id"]):
-        ar_s = f"{r['arc_radius_mm']:.1f}" if r["arc_radius_mm"] else "—"
-        print(f"{r['finger']:<8} {r['length_mm']:>8.2f}mm {r['width_mm']:>7.2f}mm "
-              f"{r['c_curve_mm']:>8.2f}mm {ar_s:>7}mm {r['thickness_mm']:>6.2f}mm "
+def print_table(results: list):
+    FID = {"thumb":0,"index":1,"middle":2,"ring":3,"pinky":4}
+    rows = sorted(results, key=lambda r: FID.get(r["finger"], 9))
+    print("\n" + "=" * 65)
+    print(f"{'Finger':<8} {'Width':>9} {'Length':>9} {'C-curve':>9} {'ArcR':>8} {'Thick':>7} {'AR':>6}")
+    print("-" * 65)
+    for r in rows:
+        ar_s = f"{r['arc_radius_mm']:.1f}" if r["arc_radius_mm"] else "  —"
+        print(f"{r['finger']:<8} {r['width_mm']:>8.2f}mm {r['length_mm']:>8.2f}mm "
+              f"{r['c_curve_mm']:>8.2f}mm {ar_s:>6}mm {r['thickness_mm']:>6.2f}mm "
               f"{r['aspect_ratio']:>6.3f}")
-    print("="*60)
+    print("=" * 65)
 
 
 # ─────────────────────────────────────────────────────────────
-# Main pipeline
+# 7.  Main pipeline
 # ─────────────────────────────────────────────────────────────
 
 def run(image_path: str, aruco_size_mm: float, output_dir: str):
-    print(f"\n[1/5] Loading image: {image_path}")
+
+    print(f"\n[1/5] Loading  {image_path}")
     image = cv2.imread(image_path)
     if image is None:
         sys.exit(f"ERROR: Cannot open '{image_path}'")
     print(f"      {image.shape[1]} × {image.shape[0]} px")
 
-    print(f"\n[2/5] Detecting ArUco marker ({aruco_size_mm} mm) …")
-    mm_per_pixel, aruco_corners, marker_id = detect_aruco(image, aruco_size_mm)
+    print(f"\n[2/5] Detecting ArUco ({aruco_size_mm} mm) …")
+    mpp, aruco_corners, marker_id = detect_aruco(image, aruco_size_mm)
 
-    print("\n[3/5] Segmenting hand …")
-    hand_mask, _ = build_hand_mask(image)
+    print(f"\n[3/5] Segmenting hand …")
+    gray      = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    hand_mask, bbox = build_hand_mask(image)
 
-    print("\n[4/5] Finding fingertips & measuring nails …")
-    fingers = find_fingertips(hand_mask)
+    print(f"\n[4/5] Finding fingertips & measuring …")
+    fingers = find_fingertips(hand_mask, bbox)
     print(f"      {len(fingers)} fingertip(s) detected")
+    if not fingers:
+        sys.exit("  ⚠  No fingertips found. Use a darker background or try manual_selector.py")
 
-    if len(fingers) == 0:
-        print("\n  ⚠  No fingertips found.")
-        print("     → Use a darker background for better contrast.")
-        print("     → Or run manual_selector.py for manual outlining.")
-        sys.exit(1)
+    names  = assign_names(fingers)
+    clahe  = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
+    results = []
 
-    names = assign_finger_names(fingers)
-
-    nail_results = []
     for i, (finger, name) in enumerate(zip(fingers, names)):
-        nail_cnt = segment_nail(image, hand_mask, finger)
-        if nail_cnt is None:
-            print(f"  ⚠  Could not segment nail for {name}")
+        m = measure_nail(hand_mask, gray, finger, mpp, clahe)
+        if m is None:
+            print(f"      ⚠  {name}: segmentation failed, skipping")
             continue
-        m = compute_measurements(nail_cnt, mm_per_pixel)
-        nail_results.append({
-            "finger":     name,
-            "finger_id":  i,
-            "tip_x":      finger["tip_x"],
-            "tip_y":      finger["tip_y"],
-            **m,
-            "pixel_scale_mm_per_px": round(mm_per_pixel, 6),
-            "nail_polygon_px": nail_cnt[:,0,:].tolist(),
-        })
-        print(f"      {name:<8}  L={m['length_mm']:5.2f}mm  W={m['width_mm']:5.2f}mm  "
-              f"C={m['c_curve_mm']:5.2f}mm  Thick={m['thickness_mm']}mm")
+        row = {
+            "finger":    name,
+            "finger_id": i,
+            "tip_x":     finger["tip_x"],
+            "tip_y":     finger["tip_y"],
+            **{k: v for k, v in m.items()},
+        }
+        results.append(row)
+        ar_s = f"{m['arc_radius_mm']:.1f}" if m["arc_radius_mm"] else "—"
+        print(f"      {name:<8}  W={m['width_mm']:5.2f}mm  L={m['length_mm']:5.2f}mm  "
+              f"C={m['c_curve_mm']:5.2f}mm  ArcR={ar_s}mm")
 
-    if not nail_results:
-        print("\n  ⚠  No nails measured. Try manual_selector.py.")
-        sys.exit(1)
+    if not results:
+        sys.exit("  ⚠  No nails measured. Try manual_selector.py")
 
-    print_table(nail_results)
+    print_table(results)
 
     print(f"\n[5/5] Saving to {output_dir}/ …")
     os.makedirs(output_dir, exist_ok=True)
 
-    # Annotated image
-    draw_results(image, nail_results, aruco_corners,
+    draw_results(image, results, aruco_corners,
                  save_path=os.path.join(output_dir, "annotated.jpg"))
     print("      annotated.jpg")
 
-    # JSON
+    # Strip internal keys before serialising
+    clean = [{k: v for k, v in r.items() if not k.startswith("_")} for r in results]
+    FID   = {"thumb":0,"index":1,"middle":2,"ring":3,"pinky":4}
+
     payload = {
         "meta": {
-            "source_image":          os.path.basename(image_path),
-            "aruco_marker_id":       marker_id,
+            "source_image":           os.path.basename(image_path),
+            "aruco_marker_id":        marker_id,
             "aruco_physical_size_mm": aruco_size_mm,
-            "mm_per_pixel":          round(mm_per_pixel, 6),
-            "nails_detected":        len(nail_results),
+            "mm_per_pixel":           round(mpp, 6),
+            "nails_detected":         len(clean),
             "measurement_notes": {
-                "length_mm":     "Base-to-tip along the nail long axis",
-                "width_mm":      "Widest point side-to-side",
-                "c_curve_mm":    "Arc depth (sagitta) across the width",
-                "arc_radius_mm": "Radius of curvature: R = w²/(8h) + h/2",
-                "thickness_mm":  "Estimated from geometry (c_curve × 1.5, clamped 0.25–0.85 mm)",
-            }
+                "width_mm":      "92nd-pct of stable row-scan widths across nail plate",
+                "length_mm":     "Tip to cuticle, detected via positive Sobel edge",
+                "c_curve_mm":    "Arc depth (sagitta) — PCA on nail outline polygon",
+                "arc_radius_mm": "R = width²/(8·c_curve) + c_curve/2",
+                "thickness_mm":  "Geometric estimate: c_curve × 1.5, clamped 0.25–0.85 mm",
+            },
         },
-        "nails":      nail_results,
-        "by_finger":  {r["finger"]: {k:v for k,v in r.items()
-                        if k not in ("finger","finger_id","tip_x","tip_y","nail_polygon_px")}
-                       for r in nail_results},
-        "mesh_params": {r["finger"]: {
-            "bounding_box_mm": {"x": r["width_mm"], "y": r["thickness_mm"], "z": r["length_mm"]},
-            "curvature":       {"c_curve_sagitta_mm": r["c_curve_mm"], "arc_radius_mm": r["arc_radius_mm"]},
-        } for r in nail_results},
+        "nails": sorted(clean, key=lambda r: FID.get(r["finger"], 9)),
+        "by_finger": {
+            r["finger"]: {k: v for k, v in r.items()
+                          if k not in ("finger","finger_id","tip_x","tip_y","nail_polygon_px")}
+            for r in clean
+        },
+        "mesh_params": {
+            r["finger"]: {
+                "bounding_box_mm": {
+                    "x": r["width_mm"],
+                    "y": r["thickness_mm"],
+                    "z": r["length_mm"],
+                },
+                "curvature": {
+                    "c_curve_sagitta_mm": r["c_curve_mm"],
+                    "arc_radius_mm":      r["arc_radius_mm"],
+                },
+            }
+            for r in clean
+        },
     }
+
     json_path = os.path.join(output_dir, "nail_measurements.json")
     with open(json_path, "w") as f:
         json.dump(payload, f, indent=2)
     print(f"      nail_measurements.json\n")
-    return nail_results, payload
+    return results, payload
 
 
 # ─────────────────────────────────────────────────────────────
@@ -506,11 +500,11 @@ def run(image_path: str, aruco_size_mm: float, output_dir: str):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(
-        description="Automatically measure 5 fingernails using an ArUco marker")
+        description="Automatically measure 5 fingernails using an ArUco scale marker")
     p.add_argument("--image",      required=True,
-                   help="Path to hand photo (use dark background for best results)")
+                   help="Path to hand photo (dark background required)")
     p.add_argument("--aruco-size", type=float, default=20.0,
-                   help="Physical side length of the printed ArUco marker in mm (default: 20)")
+                   help="Physical side length of the printed ArUco inner square in mm (default: 20)")
     p.add_argument("--output",     default="nail_results",
                    help="Output folder (default: nail_results/)")
     args = p.parse_args()
