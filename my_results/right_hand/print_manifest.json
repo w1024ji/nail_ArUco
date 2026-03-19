@@ -1,0 +1,182 @@
+{
+  "hand": "right",
+  "source_measurements": "my_results/nail_measurements.json",
+  "tip_length_mm": 5.0,
+  "wall_thick_mm": 0.5,
+  "center_thick_mm": 0.8,
+  "standard_reference": "Average Asian women nail dimensions (Lee et al., 2019)",
+  "size_categories": {
+    "much_smaller": "user nail \u2264 \u22123.0 mm vs standard",
+    "smaller": "user nail \u22123.0 to \u22121.0 mm vs standard",
+    "average": "user nail within \u00b11.0 mm of standard",
+    "larger": "user nail +1.0 to +3.0 mm vs standard",
+    "much_larger": "user nail \u2265 +3.0 mm vs standard"
+  },
+  "nails": [
+    {
+      "finger": "thumb",
+      "stl_file": "nail_tip_thumb.stl",
+      "width_mm": 10.2,
+      "length_natural_mm": 10.61,
+      "length_total_mm": 15.61,
+      "c_curve_cross_section_mm": 3.5,
+      "triangles": 17276,
+      "file_kb": 843.6,
+      "bounding_box_mm": {
+        "width_mm": 10.2,
+        "length_mm": 15.61,
+        "height_mm": 4.0
+      },
+      "size_vs_standard": {
+        "reference": "Average Asian women (Lee et al., 2019)",
+        "standard_width_mm": 14.5,
+        "standard_length_mm": 14.5,
+        "user_width_mm": 10.2,
+        "user_length_mm": 10.61,
+        "width_diff_mm": -4.3,
+        "length_diff_mm": -3.89,
+        "width_category": "much_smaller",
+        "length_category": "much_smaller",
+        "overall_size": "much_smaller"
+      },
+      "printing_tips": {
+        "orientation": "Print top-face-down on build plate",
+        "supports": "None needed in recommended orientation",
+        "layer_height": "0.05 mm resin / 0.1 mm FDM",
+        "material": "Resin (best detail) or TPU (flexible)"
+      }
+    },
+    {
+      "finger": "index",
+      "stl_file": "nail_tip_index.stl",
+      "width_mm": 10.2,
+      "length_natural_mm": 10.2,
+      "length_total_mm": 15.2,
+      "c_curve_cross_section_mm": 3.2,
+      "triangles": 17276,
+      "file_kb": 843.6,
+      "bounding_box_mm": {
+        "width_mm": 10.2,
+        "length_mm": 15.2,
+        "height_mm": 3.7
+      },
+      "size_vs_standard": {
+        "reference": "Average Asian women (Lee et al., 2019)",
+        "standard_width_mm": 12.2,
+        "standard_length_mm": 12.5,
+        "user_width_mm": 10.2,
+        "user_length_mm": 10.2,
+        "width_diff_mm": -2.0,
+        "length_diff_mm": -2.3,
+        "width_category": "smaller",
+        "length_category": "smaller",
+        "overall_size": "smaller"
+      },
+      "printing_tips": {
+        "orientation": "Print top-face-down on build plate",
+        "supports": "None needed in recommended orientation",
+        "layer_height": "0.05 mm resin / 0.1 mm FDM",
+        "material": "Resin (best detail) or TPU (flexible)"
+      }
+    },
+    {
+      "finger": "middle",
+      "stl_file": "nail_tip_middle.stl",
+      "width_mm": 10.0,
+      "length_natural_mm": 10.82,
+      "length_total_mm": 15.82,
+      "c_curve_cross_section_mm": 3.0,
+      "triangles": 17276,
+      "file_kb": 843.6,
+      "bounding_box_mm": {
+        "width_mm": 10.0,
+        "length_mm": 15.82,
+        "height_mm": 3.5
+      },
+      "size_vs_standard": {
+        "reference": "Average Asian women (Lee et al., 2019)",
+        "standard_width_mm": 12.7,
+        "standard_length_mm": 13.5,
+        "user_width_mm": 10.0,
+        "user_length_mm": 10.82,
+        "width_diff_mm": -2.7,
+        "length_diff_mm": -2.68,
+        "width_category": "smaller",
+        "length_category": "smaller",
+        "overall_size": "smaller"
+      },
+      "printing_tips": {
+        "orientation": "Print top-face-down on build plate",
+        "supports": "None needed in recommended orientation",
+        "layer_height": "0.05 mm resin / 0.1 mm FDM",
+        "material": "Resin (best detail) or TPU (flexible)"
+      }
+    },
+    {
+      "finger": "ring",
+      "stl_file": "nail_tip_ring.stl",
+      "width_mm": 9.18,
+      "length_natural_mm": 8.77,
+      "length_total_mm": 13.77,
+      "c_curve_cross_section_mm": 3.0,
+      "triangles": 17276,
+      "file_kb": 843.6,
+      "bounding_box_mm": {
+        "width_mm": 9.18,
+        "length_mm": 13.77,
+        "height_mm": 3.5
+      },
+      "size_vs_standard": {
+        "reference": "Average Asian women (Lee et al., 2019)",
+        "standard_width_mm": 11.7,
+        "standard_length_mm": 12.5,
+        "user_width_mm": 9.18,
+        "user_length_mm": 8.77,
+        "width_diff_mm": -2.52,
+        "length_diff_mm": -3.73,
+        "width_category": "smaller",
+        "length_category": "much_smaller",
+        "overall_size": "much_smaller"
+      },
+      "printing_tips": {
+        "orientation": "Print top-face-down on build plate",
+        "supports": "None needed in recommended orientation",
+        "layer_height": "0.05 mm resin / 0.1 mm FDM",
+        "material": "Resin (best detail) or TPU (flexible)"
+      }
+    },
+    {
+      "finger": "pinky",
+      "stl_file": "nail_tip_pinky.stl",
+      "width_mm": 10.41,
+      "length_natural_mm": 10.61,
+      "length_total_mm": 15.61,
+      "c_curve_cross_section_mm": 2.8,
+      "triangles": 17276,
+      "file_kb": 843.6,
+      "bounding_box_mm": {
+        "width_mm": 10.41,
+        "length_mm": 15.61,
+        "height_mm": 3.3
+      },
+      "size_vs_standard": {
+        "reference": "Average Asian women (Lee et al., 2019)",
+        "standard_width_mm": 9.7,
+        "standard_length_mm": 10.5,
+        "user_width_mm": 10.41,
+        "user_length_mm": 10.61,
+        "width_diff_mm": 0.71,
+        "length_diff_mm": 0.11,
+        "width_category": "average",
+        "length_category": "average",
+        "overall_size": "average"
+      },
+      "printing_tips": {
+        "orientation": "Print top-face-down on build plate",
+        "supports": "None needed in recommended orientation",
+        "layer_height": "0.05 mm resin / 0.1 mm FDM",
+        "material": "Resin (best detail) or TPU (flexible)"
+      }
+    }
+  ]
+}
