@@ -1,5 +1,17 @@
 {
   "hand": "right",
+  "overall_hand_size": {
+    "hand_size": "small",
+    "basis": "middle finger vs Asian women standard",
+    "middle_finger_width_mm": 10.0,
+    "middle_finger_length_mm": 10.82,
+    "standard_width_mm": 12.7,
+    "standard_length_mm": 13.5,
+    "width_diff_mm": -2.7,
+    "length_diff_mm": -2.68,
+    "avg_diff_mm": -2.69,
+    "thresholds": "small: avg_diff < \u22121.0 mm  |  large: avg_diff > +1.0 mm"
+  },
   "source_measurements": "my_results/nail_measurements.json",
   "tip_length_mm": 5.0,
   "wall_thick_mm": 0.5,

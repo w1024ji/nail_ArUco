@@ -1,7 +1,17 @@
 """
-nail_tip_generator.py  ·  v2
+nail_tip_generator.py  ·  v3
 ─────────────────────────────────────────────────────────────────────
 Generates printable 3D nail-tip STL files from nail_measurements.json.
+
+What's new in v3
+────────────────
+  • overall_hand_size — top-level field added to print_manifest.json
+                        that classifies the whole hand as:
+                          "small" | "average" | "large"
+                        Based on the middle finger (most representative),
+                        using both width and length equally vs the Asian
+                        women standard. Thresholds: diff < −1.0 mm → small,
+                        diff > +1.0 mm → large, otherwise → average.
 
 What's new in v2
 ────────────────
@@ -152,6 +162,50 @@ def compare_to_standard(finger: str, width_mm: float, length_mm: float) -> dict:
         "width_category":     w_cat,
         "length_category":    l_cat,
         "overall_size":       overall_category(w_cat, l_cat),
+    }
+
+
+def overall_hand_size(nails: dict) -> dict:
+    """
+    Classify the whole hand as "small", "average", or "large".
+
+    Method: uses the middle finger only (most anatomically consistent),
+    comparing both width and length equally against the Asian women standard.
+
+    Average of the two diffs:
+      avg_diff < −1.0 mm  →  "small"
+      avg_diff > +1.0 mm  →  "large"
+      otherwise           →  "average"
+
+    Returns a dict with the classification and the supporting numbers.
+    """
+    middle = nails.get("middle")
+    if middle is None:
+        return {"hand_size": "unknown", "note": "middle finger not found in measurements"}
+
+    std       = STANDARD_NAILS["middle"]
+    w_diff    = round(middle["width_mm"]  - std["width_mm"],  2)
+    l_diff    = round(middle["length_mm"] - std["length_mm"], 2)
+    avg_diff  = round((w_diff + l_diff) / 2.0, 2)
+
+    if avg_diff < -1.0:
+        hand_size = "small"
+    elif avg_diff > 1.0:
+        hand_size = "large"
+    else:
+        hand_size = "average"
+
+    return {
+        "hand_size":                  hand_size,
+        "basis":                      "middle finger vs Asian women standard",
+        "middle_finger_width_mm":     round(middle["width_mm"],  2),
+        "middle_finger_length_mm":    round(middle["length_mm"], 2),
+        "standard_width_mm":          std["width_mm"],
+        "standard_length_mm":         std["length_mm"],
+        "width_diff_mm":              w_diff,
+        "length_diff_mm":             l_diff,
+        "avg_diff_mm":                avg_diff,
+        "thresholds":                 "small: avg_diff < −1.0 mm  |  large: avg_diff > +1.0 mm",
     }
 
 
@@ -410,9 +464,15 @@ def build_all(json_path: str, hand: str, tip_length: float,
     print(f"  {'─'*72}")
     print(f"\n  ✅  {len(summary)} STL file(s) saved to '{hand_dir}/'")
 
+    # ── Overall hand size (middle finger vs standard) ────────
+    hand_size_info = overall_hand_size(nails)
+    print(f"  Overall hand size : {hand_size_info['hand_size'].upper()}"
+          f"  (middle finger avg diff: {hand_size_info['avg_diff_mm']:+.2f} mm vs standard)\n")
+
     # ── Write print_manifest.json ────────────────────────────
     manifest = {
         "hand":                hand,
+        "overall_hand_size":   hand_size_info,   # ← NEW in v3
         "source_measurements": json_path,
         "tip_length_mm":       tip_length,
         "wall_thick_mm":       wall_thick,
