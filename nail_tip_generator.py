@@ -92,30 +92,45 @@ import numpy as np
 # ─────────────────────────────────────────────────────────────
 # Standard nail dimensions — Asian women reference database
 # ─────────────────────────────────────────────────────────────
-# Sources: Lee et al. (2019) Korean women nail morphology study;
-#          clinical nail measurement databases (dermatology literature).
-# Values represent the middle of the typical adult range (20–40 yrs).
+# Width source : clinical measurements of young Asian female volunteers.
+#   thumb  12.1 mm ± 1.1 mm  — confirmed by research
+#   index   9.1 mm ± 0.5 mm  — confirmed by research
+#   pinky   7.0 mm ± 1.0 mm  — midpoint of reported 6–8 mm range
+#   middle  9.6 mm ± 0.6 mm  — derived: "slightly wider than index" → index + 0.5 mm
+#   ring    8.3 mm ± 0.5 mm  — derived: midpoint between middle and pinky
+#
+# Length source : proportional scaling from width correction ratio (~0.78×).
+#   Length data for Asian women specifically was not available in the source;
+#   values are best estimates and may be refined when dedicated data is found.
+#
+# C-curve: anatomical estimates, unchanged.
 #
 # Size category thresholds (user − standard, mm):
-#   much_smaller : diff ≤ −3.0
-#   smaller      : −3.0 < diff ≤ −1.0
+#   much_smaller : diff ≤ −2.0
+#   smaller      : −2.0 < diff ≤ −1.0
 #   average      : −1.0 < diff <  +1.0
-#   larger       : +1.0 ≤ diff <  +3.0
-#   much_larger  : diff ≥ +3.0
+#   larger       : +1.0 ≤ diff <  +2.0
+#   much_larger  : diff ≥ +2.0
+# (Tighter than before because the new widths have a smaller ± range)
 
 STANDARD_NAILS = {
-    "thumb":  {"width_mm": 14.5, "length_mm": 14.5, "c_curve_mm": 4.2},
-    "index":  {"width_mm": 12.2, "length_mm": 12.5, "c_curve_mm": 3.4},
-    "middle": {"width_mm": 12.7, "length_mm": 13.5, "c_curve_mm": 3.4},
-    "ring":   {"width_mm": 11.7, "length_mm": 12.5, "c_curve_mm": 3.2},
-    "pinky":  {"width_mm":  9.7, "length_mm": 10.5, "c_curve_mm": 2.7},
+    "thumb":  {"width_mm": 12.1, "length_mm": 11.3, "c_curve_mm": 4.2,
+               "width_std": 1.1, "width_source": "confirmed by research"},
+    "index":  {"width_mm":  9.1, "length_mm":  9.8, "c_curve_mm": 3.4,
+               "width_std": 0.5, "width_source": "confirmed by research"},
+    "middle": {"width_mm":  9.6, "length_mm": 10.5, "c_curve_mm": 3.4,
+               "width_std": 0.6, "width_source": "derived: index + 0.5 mm"},
+    "ring":   {"width_mm":  8.3, "length_mm":  9.8, "c_curve_mm": 3.2,
+               "width_std": 0.5, "width_source": "derived: midpoint middle–pinky"},
+    "pinky":  {"width_mm":  7.0, "length_mm":  8.2, "c_curve_mm": 2.7,
+               "width_std": 1.0, "width_source": "midpoint of reported 6–8 mm range"},
 }
 
 SIZE_THRESHOLDS = [
-    (-3.0,        "much_smaller"),
+    (-2.0,        "much_smaller"),
     (-1.0,        "smaller"),
     ( 1.0,        "average"),
-    ( 3.0,        "larger"),
+    ( 2.0,        "larger"),
     (float("inf"),"much_larger"),
 ]
 
@@ -151,17 +166,42 @@ def compare_to_standard(finger: str, width_mm: float, length_mm: float) -> dict:
     w_cat  = size_category(w_diff)
     l_cat  = size_category(l_diff)
 
+    # Plain-English descriptions for the image-generation team
+    def plain(cat: str, dimension: str) -> str:
+        return {
+            "much_smaller": f"much narrower {dimension} than average",
+            "smaller":      f"narrower {dimension} than average",
+            "average":      f"average {dimension}",
+            "larger":       f"wider {dimension} than average",
+            "much_larger":  f"much wider {dimension} than average",
+        }[cat] if dimension == "width" else {
+            "much_smaller": f"much shorter {dimension} than average",
+            "smaller":      f"shorter {dimension} than average",
+            "average":      f"average {dimension}",
+            "larger":       f"longer {dimension} than average",
+            "much_larger":  f"much longer {dimension} than average",
+        }[cat]
+
     return {
-        "reference":          "Average Asian women (Lee et al., 2019)",
-        "standard_width_mm":  std["width_mm"],
-        "standard_length_mm": std["length_mm"],
-        "user_width_mm":      round(width_mm,  2),
-        "user_length_mm":     round(length_mm, 2),
-        "width_diff_mm":      w_diff,
-        "length_diff_mm":     l_diff,
-        "width_category":     w_cat,
-        "length_category":    l_cat,
-        "overall_size":       overall_category(w_cat, l_cat),
+        "reference":              "Asian women clinical measurements",
+        "width_source":           std["width_source"],
+        # Width
+        "standard_width_mm":      std["width_mm"],
+        "standard_width_std_mm":  std["width_std"],
+        "user_width_mm":          round(width_mm, 2),
+        "width_diff_mm":          w_diff,
+        "width_category":         w_cat,
+        "width_description":      plain(w_cat, "width"),
+        # Length
+        "standard_length_mm":     std["length_mm"],
+        "standard_length_note":   "estimated — dedicated Asian women length data not yet available",
+        "user_length_mm":         round(length_mm, 2),
+        "length_diff_mm":         l_diff,
+        "length_category":        l_cat,
+        "length_description":     plain(l_cat, "length"),
+        # Combined
+        "overall_size":           overall_category(w_cat, l_cat),
+        "overall_description":    plain(overall_category(w_cat, l_cat), "width"),
     }
 
 
@@ -197,7 +237,7 @@ def overall_hand_size(nails: dict) -> dict:
 
     return {
         "hand_size":                  hand_size,
-        "basis":                      "middle finger vs Asian women standard",
+        "basis":                      "middle finger vs Asian women clinical standard",
         "middle_finger_width_mm":     round(middle["width_mm"],  2),
         "middle_finger_length_mm":    round(middle["length_mm"], 2),
         "standard_width_mm":          std["width_mm"],
@@ -380,6 +420,53 @@ DEFAULT_CROSS_SECTION_C = {
     "pinky":  2.8,
 }
 
+# ─────────────────────────────────────────────────────────────
+# C-curve presets  (sagitta measured on a 10 mm reference nail)
+# ─────────────────────────────────────────────────────────────
+# Three levels cover the practical range of human nail curvature.
+# Values are expressed as a fraction of nail width so they scale
+# correctly to any finger via: c_i = R − √(R² − (w_i/2)²)
+# where R is derived from the middle-finger reference.
+#
+#  flat   : 18 % of width  →  1.8 mm on a 10 mm nail  (very flat nails)
+#  medium : 32 % of width  →  3.2 mm on a 10 mm nail  (average curvature)
+#  steep  : 48 % of width  →  4.8 mm on a 10 mm nail  (highly curved nails)
+
+C_CURVE_LEVELS = {
+    "flat":   {"sagitta_pct": 0.18, "label": "Close to flat",   "example_mm": 1.8},
+    "medium": {"sagitta_pct": 0.32, "label": "Slightly curved", "example_mm": 3.2},
+    "steep":  {"sagitta_pct": 0.48, "label": "Very curved",     "example_mm": 4.8},
+}
+
+
+def ccurve_for_finger(level: str, width_mm: float,
+                       ref_width_mm: float = 10.0) -> float:
+    """
+    Return the C-curve sagitta (mm) for a finger of width_mm,
+    given the chosen preset level.
+
+    Uses a constant-arc-radius assumption:
+      R  = derived from (ref_width_mm, sagitta_ref)
+      c  = R − √(R² − (width_mm/2)²)
+    """
+    lv        = C_CURVE_LEVELS[level]
+    h_ref     = ref_width_mm * lv["sagitta_pct"]
+    R         = ref_width_mm**2 / (8 * h_ref) + h_ref / 2
+    half_w    = width_mm / 2.0
+    under     = R**2 - half_w**2
+    c         = R - np.sqrt(max(under, 0.0))
+    return round(c, 2)
+
+
+def print_curve_options():
+    """Print the three curve levels to the terminal so the user can choose."""
+    print("\n  Available C-curve levels (--curve):")
+    print(f"  {'─'*52}")
+    for name, lv in C_CURVE_LEVELS.items():
+        print(f"  {name:<8}  {lv['label']:<20}  "
+              f"({lv['example_mm']:.1f} mm sagitta on a 10 mm nail)")
+    print(f"  {'─'*52}\n")
+
 
 # ─────────────────────────────────────────────────────────────
 # Build all STLs for one hand
@@ -388,6 +475,7 @@ DEFAULT_CROSS_SECTION_C = {
 def build_all(json_path: str, hand: str, tip_length: float,
               c_override: float | None, output_dir: str,
               wall_thick: float, center_thick: float,
+              curve: str | None = None,
               fingers_filter: list | None = None) -> list:
     """
     Generate STL files for one hand and write print_manifest.json.
@@ -422,6 +510,10 @@ def build_all(json_path: str, hand: str, tip_length: float,
 
     print(f"\n  Hand   : {hand.upper()}")
     print(f"  Folder : {hand_dir}/")
+    if curve:
+        lv = C_CURVE_LEVELS[curve]
+        print(f"  C-curve: {curve}  ({lv['label']}, "
+              f"{lv['example_mm']:.1f} mm on 10 mm nail)")
     print(f"\n  {'─'*72}")
     print(f"  {'Finger':<8} {'W(mm)':>7} {'L(mm)':>7} {'Tip(mm)':>8} "
           f"{'C(mm)':>7}  {'Overall vs standard':<22}  File")
@@ -432,8 +524,15 @@ def build_all(json_path: str, hand: str, tip_length: float,
             print(f"  {finger:<8}  (not found in measurements, skipping)")
             continue
 
-        m        = nails[finger]
-        C_cross  = c_override if c_override else DEFAULT_CROSS_SECTION_C.get(finger, 3.0)
+        m = nails[finger]
+
+        # Resolve C-curve: --curve preset > --c-curve-override > anatomical default
+        if curve:
+            C_cross = ccurve_for_finger(curve, m["width_mm"])
+        elif c_override:
+            C_cross = c_override
+        else:
+            C_cross = DEFAULT_CROSS_SECTION_C.get(finger, 3.0)
         size_cmp = compare_to_standard(finger, m["width_mm"], m["length_mm"])
 
         params = {
@@ -472,18 +571,20 @@ def build_all(json_path: str, hand: str, tip_length: float,
     # ── Write print_manifest.json ────────────────────────────
     manifest = {
         "hand":                hand,
-        "overall_hand_size":   hand_size_info,   # ← NEW in v3
+        "overall_hand_size":   hand_size_info,
+        "curve_level":         curve if curve else "custom",
+        "curve_label":         C_CURVE_LEVELS[curve]["label"] if curve else "custom values",
         "source_measurements": json_path,
         "tip_length_mm":       tip_length,
         "wall_thick_mm":       wall_thick,
         "center_thick_mm":     center_thick,
-        "standard_reference":  "Average Asian women nail dimensions (Lee et al., 2019)",
+        "standard_reference":  "Asian women clinical measurements",
         "size_categories": {
-            "much_smaller": "user nail ≤ −3.0 mm vs standard",
-            "smaller":      "user nail −3.0 to −1.0 mm vs standard",
+            "much_smaller": "user nail ≤ −2.0 mm vs standard",
+            "smaller":      "user nail −2.0 to −1.0 mm vs standard",
             "average":      "user nail within ±1.0 mm of standard",
-            "larger":       "user nail +1.0 to +3.0 mm vs standard",
-            "much_larger":  "user nail ≥ +3.0 mm vs standard",
+            "larger":       "user nail +1.0 to +2.0 mm vs standard",
+            "much_larger":  "user nail ≥ +2.0 mm vs standard",
         },
         "nails": [
             {
@@ -556,6 +657,13 @@ if __name__ == "__main__":
     p.add_argument("--c-curve-override", type=float, default=None,
                    help="Override cross-section C-curve for all fingers (mm). "
                         "Omit to use per-finger anatomical defaults (2.8–3.5 mm).")
+    p.add_argument("--curve",           default=None,
+                   choices=["flat", "medium", "steep"],
+                   help="C-curve preset for the nail tip cross-section.\n"
+                        "  flat   = close to flat  (1.8 mm on a 10 mm nail)\n"
+                        "  medium = slightly curved (3.2 mm on a 10 mm nail)\n"
+                        "  steep  = very curved     (4.8 mm on a 10 mm nail)\n"
+                        "Omit to use per-finger anatomical defaults.")
     p.add_argument("--wall-thick",       type=float, default=0.5,
                    help="Wall thickness at side edges in mm (default: 0.5)")
     p.add_argument("--center-thick",     type=float, default=0.8,
@@ -566,6 +674,10 @@ if __name__ == "__main__":
 
     args = p.parse_args()
 
+    # If no --curve given, print the options as a helpful reminder
+    if args.curve is None and args.c_curve_override is None:
+        print_curve_options()
+
     build_all(
         json_path      = args.measurements,
         hand           = args.hand,
@@ -574,5 +686,6 @@ if __name__ == "__main__":
         output_dir     = args.output,
         wall_thick     = args.wall_thick,
         center_thick   = args.center_thick,
+        curve          = args.curve,
         fingers_filter = [args.finger] if args.finger else None,
     )

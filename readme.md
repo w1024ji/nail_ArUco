@@ -2,14 +2,13 @@
 ### ArUco-based · 5 fingers · JSON output for 3-D mesh pipeline
 
 ---
-
-## Files
-
-| File | Role |
-|------|------|
-| `nail_measurer.py`   | **Main script** — auto-detects 5 nails & saves JSON |
-| `manual_selector.py` | Interactive fallback — click nail outlines by hand |
-| `generate_aruco.py`  | Generates a printable ArUco marker at exact physical size |
+## commands
+```bash
+python nail_measurer.py --image fingers_left.jpg --aruco-size 20 --output my_results_left
+python nail_tip_generator.py --measurements nail_measurements.json --hand right --curve flat
+python nail_tip_generator.py --measurements nail_measurements.json --hand right --curve medium
+python nail_tip_generator.py --measurements nail_measurements.json --hand right --curve steep
+```
 
 ---
 

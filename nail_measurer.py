@@ -1,7 +1,23 @@
 """
-nail_measurer.py  ·  v4  ·  Fully Automatic
+nail_measurer.py  ·  v5  ·  Fully Automatic
 --------------------------------------------
 Measures all 5 fingernails from a single top-down photo with an ArUco marker.
+
+What's new in v5
+----------------
+  • W/L ratio validation  — each nail is checked against the Jung et al. (2015)
+                            Width-to-Length ratio standard for women (W/L ≈ 0.91
+                            for all fingers, ±0.06–0.08).
+  • corrected_length_mm   — added to every nail entry. Derived as width / W/L_std.
+                            More reliable when the Sobel cuticle detection is uncertain.
+  • wl_ratio_check        — added to every nail entry:
+                              measured_wl      : width / length_mm (raw)
+                              standard_wl      : 0.91 (per Jung et al.)
+                              wl_std_dev       : ±1σ from study
+                              within_1_sigma   : true/false
+                              flag             : "ok" or "length_suspect"
+                            If within_1_sigma is false, corrected_length_mm
+                            is the more reliable value to use downstream.
 
 What's new in v4
 ----------------
@@ -49,6 +65,21 @@ ARUCO_DICTS = {
     "4x4_100": cv2.aruco.DICT_4X4_100,
     "5x5_50":  cv2.aruco.DICT_5X5_50,
     "5x5_100": cv2.aruco.DICT_5X5_100,
+}
+
+
+# ─────────────────────────────────────────────────────────────
+# W/L ratio reference — Jung et al. (2015)
+# "Fingernail Configuration" anthropometric study, women
+# W/L = nail width / nail length
+# ─────────────────────────────────────────────────────────────
+
+WL_STANDARD = {
+    "thumb":  {"ratio": 0.91, "std_dev": 0.08},
+    "index":  {"ratio": 0.91, "std_dev": 0.07},
+    "middle": {"ratio": 0.91, "std_dev": 0.06},
+    "ring":   {"ratio": 0.91, "std_dev": 0.06},
+    "pinky":  {"ratio": 0.90, "std_dev": 0.07},
 }
 
 
@@ -293,7 +324,50 @@ def measure_nail(hand_mask: np.ndarray, gray: np.ndarray,
 
 
 # ─────────────────────────────────────────────────────────────
-# 5.  Finger naming
+# 5.  W/L ratio validation & length correction
+# ─────────────────────────────────────────────────────────────
+
+def apply_wl_correction(finger: str, width_mm: float, length_mm: float) -> dict:
+    """
+    Validate the measured W/L ratio against Jung et al. (2015) and compute
+    a corrected length derived purely from width and the standard W/L ratio.
+
+    Returns a dict with:
+      corrected_length_mm  — width / standard_wl  (reliable even if cuticle
+                             detection was imprecise)
+      wl_ratio_check       — full validation block for downstream consumers
+    """
+    ref = WL_STANDARD.get(finger, {"ratio": 0.91, "std_dev": 0.07})
+    std_wl = ref["ratio"]
+    std_sd = ref["std_dev"]
+
+    measured_wl      = round(width_mm / length_mm, 3) if length_mm else 0.0
+    wl_diff          = round(measured_wl - std_wl, 3)
+    within_1_sigma   = abs(wl_diff) <= std_sd
+    corrected_length = round(width_mm / std_wl, 2)
+
+    return {
+        "corrected_length_mm": corrected_length,
+        "wl_ratio_check": {
+            "source":          "Jung et al. (2015) — Fingernail Configuration",
+            "measured_wl":     measured_wl,
+            "standard_wl":     std_wl,
+            "wl_std_dev":      std_sd,
+            "wl_diff":         wl_diff,
+            "within_1_sigma":  within_1_sigma,
+            "flag":            "ok" if within_1_sigma else "length_suspect",
+            "note": (
+                "length_mm is reliable"
+                if within_1_sigma else
+                "measured W/L is outside ±1σ — corrected_length_mm "
+                "is the recommended value for downstream use"
+            ),
+        },
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# 6.  Finger naming
 # ─────────────────────────────────────────────────────────────
 
 def assign_names(fingers: list) -> list:
@@ -323,7 +397,7 @@ def assign_names(fingers: list) -> list:
 
 
 # ─────────────────────────────────────────────────────────────
-# 6.  Visualisation
+# 7.  Visualisation
 # ─────────────────────────────────────────────────────────────
 
 NAIL_COLORS = {
@@ -377,19 +451,65 @@ def draw_results(image: np.ndarray, results: list,
 def print_table(results: list):
     FID = {"thumb":0,"index":1,"middle":2,"ring":3,"pinky":4}
     rows = sorted(results, key=lambda r: FID.get(r["finger"], 9))
-    print("\n" + "=" * 65)
-    print(f"{'Finger':<8} {'Width':>9} {'Length':>9} {'C-curve':>9} {'ArcR':>8} {'Thick':>7} {'AR':>6}")
-    print("-" * 65)
+    print("\n" + "=" * 80)
+    print(f"{'Finger':<8} {'Width':>9} {'Length':>9} {'CorrL':>8} {'W/L':>6} {'Flag':<16} {'C-curve':>9}")
+    print("-" * 80)
     for r in rows:
-        ar_s = f"{r['arc_radius_mm']:.1f}" if r["arc_radius_mm"] else "  —"
+        flag = r["wl_ratio_check"]["flag"]
+        wl   = r["wl_ratio_check"]["measured_wl"]
         print(f"{r['finger']:<8} {r['width_mm']:>8.2f}mm {r['length_mm']:>8.2f}mm "
-              f"{r['c_curve_mm']:>8.2f}mm {ar_s:>6}mm {r['thickness_mm']:>6.2f}mm "
-              f"{r['aspect_ratio']:>6.3f}")
-    print("=" * 65)
+              f"{r['corrected_length_mm']:>7.2f}mm {wl:>6.3f} {flag:<16} "
+              f"{r['c_curve_mm']:>8.2f}mm")
+    print("=" * 80)
 
 
 # ─────────────────────────────────────────────────────────────
-# 7.  Main pipeline
+# 8.  Overall nail length classification
+# ─────────────────────────────────────────────────────────────
+
+# Standard lengths from STANDARD_NAILS (Asian women, Lee et al. 2019)
+# Used as the threshold: corrected_length_mm vs standard_length_mm per finger.
+# Each finger votes "long" or "short"; majority wins.
+# Tie (e.g. 2 long, 2 short, 1 unknown) → "short" (conservative default).
+
+def nail_length_category(results: list) -> str:
+    """
+    Returns "long" or "short" for the whole hand.
+
+    Method:
+      1. For each finger, compare corrected_length_mm to the Asian women
+         standard length (Lee et al. 2019).
+      2. If corrected_length_mm >= standard → vote "long", else → vote "short".
+      3. Majority of votes decides the final label.
+         Tie → "short" (conservative default).
+    """
+    STANDARD_LENGTH = {
+        "thumb":  14.5,
+        "index":  12.5,
+        "middle": 13.5,
+        "ring":   12.5,
+        "pinky":  10.5,
+    }
+
+    votes = []
+    for r in results:
+        finger   = r["finger"]
+        std_len  = STANDARD_LENGTH.get(finger)
+        corr_len = r.get("corrected_length_mm")
+        if std_len is None or corr_len is None:
+            continue
+        votes.append("long" if corr_len >= std_len else "short")
+
+    if not votes:
+        return "short"   # fallback if no fingers measured
+
+    long_count  = votes.count("long")
+    short_count = votes.count("short")
+    return "long" if long_count > short_count else "short"
+
+
+# ─────────────────────────────────────────────────────────────
+# 9.  Main pipeline
 # ─────────────────────────────────────────────────────────────
 
 def run(image_path: str, aruco_size_mm: float, output_dir: str):
@@ -422,24 +542,31 @@ def run(image_path: str, aruco_size_mm: float, output_dir: str):
         if m is None:
             print(f"      ⚠  {name}: segmentation failed, skipping")
             continue
+        wl = apply_wl_correction(name, m["width_mm"], m["length_mm"])
         row = {
             "finger":    name,
             "finger_id": i,
             "tip_x":     finger["tip_x"],
             "tip_y":     finger["tip_y"],
             **{k: v for k, v in m.items()},
+            **wl,
         }
         results.append(row)
-        ar_s = f"{m['arc_radius_mm']:.1f}" if m["arc_radius_mm"] else "—"
+        ar_s  = f"{m['arc_radius_mm']:.1f}" if m["arc_radius_mm"] else "—"
+        flag  = wl["wl_ratio_check"]["flag"]
+        flag_s = "" if flag == "ok" else "  ⚠  length_suspect"
         print(f"      {name:<8}  W={m['width_mm']:5.2f}mm  L={m['length_mm']:5.2f}mm  "
-              f"C={m['c_curve_mm']:5.2f}mm  ArcR={ar_s}mm")
+              f"corrL={wl['corrected_length_mm']:5.2f}mm  W/L={wl['wl_ratio_check']['measured_wl']:.3f}"
+              f"{flag_s}")
 
     if not results:
         sys.exit("  ⚠  No nails measured. Try manual_selector.py")
 
     print_table(results)
 
-    print(f"\n[5/5] Saving to {output_dir}/ …")
+    # Overall nail length classification (majority vote across all fingers)
+    nail_length = nail_length_category(results)
+    print(f"  → Overall nail length : {nail_length.upper()}\n")
     os.makedirs(output_dir, exist_ok=True)
 
     draw_results(image, results, aruco_corners,
@@ -451,6 +578,7 @@ def run(image_path: str, aruco_size_mm: float, output_dir: str):
     FID   = {"thumb":0,"index":1,"middle":2,"ring":3,"pinky":4}
 
     payload = {
+        "nail_length": nail_length,
         "meta": {
             "source_image":           os.path.basename(image_path),
             "aruco_marker_id":        marker_id,
@@ -458,11 +586,15 @@ def run(image_path: str, aruco_size_mm: float, output_dir: str):
             "mm_per_pixel":           round(mpp, 6),
             "nails_detected":         len(clean),
             "measurement_notes": {
-                "width_mm":      "92nd-pct of stable row-scan widths across nail plate",
-                "length_mm":     "Tip to cuticle, detected via positive Sobel edge",
-                "c_curve_mm":    "Arc depth (sagitta) — PCA on nail outline polygon",
-                "arc_radius_mm": "R = width²/(8·c_curve) + c_curve/2",
-                "thickness_mm":  "Geometric estimate: c_curve × 1.5, clamped 0.25–0.85 mm",
+                "width_mm":             "92nd-pct of stable row-scan widths across nail plate",
+                "length_mm":            "Tip to cuticle, detected via positive Sobel edge",
+                "corrected_length_mm":  "width / standard W/L ratio (Jung et al. 2015) — "
+                                        "use this when wl_ratio_check.flag is 'length_suspect'",
+                "wl_ratio_check":       "Validates measured W/L against Jung et al. (2015); "
+                                        "flags nails where length detection may be inaccurate",
+                "c_curve_mm":           "Arc depth (sagitta) — PCA on nail outline polygon",
+                "arc_radius_mm":        "R = width²/(8·c_curve) + c_curve/2",
+                "thickness_mm":         "Geometric estimate: c_curve × 1.5, clamped 0.25–0.85 mm",
             },
         },
         "nails": sorted(clean, key=lambda r: FID.get(r["finger"], 9)),
