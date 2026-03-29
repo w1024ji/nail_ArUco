@@ -1,77 +1,72 @@
 """
-nail_tip_generator.py  ·  v3
+nail_tip_generator.py  ·  v4
 ─────────────────────────────────────────────────────────────────────
 Generates printable 3D nail-tip STL files from nail_measurements.json.
 
+What's new in v4
+────────────────
+  • --shape flag  — 6 nail tip shapes (viewed from above):
+                      square    flat straight edge, full width
+                      squoval   square with rounded corners
+                      oval      elliptical taper (most natural look)
+                      almond    narrower taper to a soft point
+                      ballerina straight taper to a flat narrow tip (coffin)
+                      stiletto  tapers to a sharp point
+                    Shapes only affect the free-tip extension; the nail
+                    bed portion stays full-width for all shapes.
+  • shape saved to print_manifest.json as "tip_shape"
+
 What's new in v3
 ────────────────
-  • overall_hand_size — top-level field added to print_manifest.json
-                        that classifies the whole hand as:
-                          "small" | "average" | "large"
-                        Based on the middle finger (most representative),
-                        using both width and length equally vs the Asian
-                        women standard. Thresholds: diff < −1.0 mm → small,
-                        diff > +1.0 mm → large, otherwise → average.
+  • overall_hand_size — top-level field in print_manifest.json:
+                        "small" | "average" | "large"
+  • --curve flag      — C-curve preset: flat / medium / steep
 
 What's new in v2
 ────────────────
-  • Two-hand support  — pass --hand left or --hand right; STLs go into
-                        output/left_hand/ or output/right_hand/
-  • Standard size DB  — built-in reference dimensions for average Asian
-                        women's nails (width, length, C-curve per finger)
-  • size_vs_standard  — every nail entry in print_manifest.json now
-                        includes a size_vs_standard block your colleagues
-                        can use for nail-art image generation:
-                          - standard_width_mm / standard_length_mm
-                          - width_diff_mm / length_diff_mm  (+ = larger)
-                          - width_category / length_category
-                            one of: "much_smaller" | "smaller" | "average"
-                                  | "larger"       | "much_larger"
-                          - overall_size  (same five categories, combined)
+  • Two-hand support  — left_hand/ and right_hand/ subfolders
+  • Standard size DB  — Asian women reference dimensions
+  • size_vs_standard  — per-finger comparison block in manifest
 
 Usage
 ─────
-  # Right hand (default):
-  python nail_tip_generator.py --measurements nail_measurements.json
-
-  # Left hand:
-  python nail_tip_generator.py --measurements nail_measurements.json --hand left
-
-  # Custom tip length:
+  # Square tips, medium C-curve, right hand:
   python nail_tip_generator.py --measurements nail_measurements.json \\
-      --hand right --tip-length 6 --output session_01/
+      --hand right --shape square --curve medium
+
+  # Oval tips, steep C-curve:
+  python nail_tip_generator.py --measurements nail_measurements.json \\
+      --hand right --shape oval --curve steep --tip-length 8
+
+  # Stiletto, flat C-curve, left hand:
+  python nail_tip_generator.py --measurements nail_measurements.json \\
+      --hand left --shape stiletto --curve flat --tip-length 10
 
   # Single finger only:
   python nail_tip_generator.py --measurements nail_measurements.json \\
-      --hand right --finger middle --tip-length 8
+      --hand right --shape almond --curve medium --finger middle
 
 Nail tip anatomy
 ────────────────
-  Cross-section (looking down the nail):
+  Top view (shape affects the free-tip outline):
 
-       ╭──────────────╮  ← top (convex, uniform wall thickness)
-      /                \\
-     │   nail tip body  │  ← wall_thick at edges, center_thick at centre
-      \\                /
-       ╰──────────────╯  ← bottom (concave well, matches natural nail C-curve)
+    Square        Squoval       Oval          Almond      Ballerina    Stiletto
+    ┌──────┐      ╭──────╮      ╭────╮          ╭──╮       ┌────┐         ╭╮
+    │      │      │      │     /      \         /    \      │    │        /  \
+    │      │      │      │    │        │       │      │    /      \      /    \
+    └──────┘      ╰──────╯    ╰────────╯       ╰──────╯   └────────┘    ╰────╯
 
-  Side view:
+  Cross-section (C-curve, looking down finger axis):
 
-       cuticle end           free tip
-           │←── nail bed ──→│←─ extension ─→│
-           │                                 │
-           ╰─────────────────────────────────╯
-
-  The cuticle end is OPEN (slides over the natural nail).
-  The free tip is CLOSED (capped).
+       ╭──────────────╮  ← top (convex)
+      / nail tip body  \
+       ╰──────────────╯  ← bottom (concave well = C-curve)
 
 Printing recommendations
 ────────────────────────
   Material     : Resin (best detail) or TPU (flexible, comfortable)
-                 PLA works but is brittle at 0.5 mm walls
   Layer height : 0.05–0.1 mm resin  /  0.1–0.15 mm FDM
-  Orientation  : Print upside-down (top surface on build plate) —
-                 best surface finish on the visible top face
+  Orientation  : Print upside-down (top surface on build plate)
   Supports     : None needed in recommended orientation
   Infill       : 100% (thin walls — solid is better)
 
@@ -338,40 +333,73 @@ def generate_nail_tip_stl(params: dict, output_path: str,
       length_mm        Natural nail bed length (measured)
       c_curve_mm       Arc sagitta across the width (cross-section curvature)
       tip_length_mm    Free-tip extension length beyond fingertip
+      tip_shape        One of: square / squoval / oval / almond / ballerina / stiletto
       wall_thick_mm    Wall thickness at the side edges   (default 0.5)
       center_thick_mm  Wall thickness at the centre line  (default 0.8)
 
+    The nail-bed portion (v=0 → v_trans) is always full width.
+    The tip extension (v_trans → 1) follows the chosen shape profile.
+
     Returns dict with mesh statistics.
     """
-    W    = float(params["width_mm"])
-    L_nb = float(params["length_mm"])
-    L_tp = float(params["tip_length_mm"])
-    L    = L_nb + L_tp
-    C    = float(params["c_curve_mm"])
-    TW   = float(params.get("wall_thick_mm",   0.5))
-    TC   = float(params.get("center_thick_mm", 0.8))
+    W     = float(params["width_mm"])
+    L_nb  = float(params["length_mm"])
+    L_tp  = float(params["tip_length_mm"])
+    L     = L_nb + L_tp
+    C     = float(params["c_curve_mm"])
+    TW    = float(params.get("wall_thick_mm",   0.5))
+    TC    = float(params.get("center_thick_mm", 0.8))
+    shape = str(params.get("tip_shape", "square"))
+
+    # Arc radius from the base C-curve — stays constant as tip narrows
+    R_arc = (W**2) / (8.0 * C) + C / 2.0 if C > 0.05 else 1e9
+
+    # v-position where the tip extension begins
+    v_trans = L_nb / L
 
     us = np.linspace(0.0, 1.0, nu)
     vs = np.linspace(0.0, 1.0, nv)
     UU, VV = np.meshgrid(us, vs)
 
-    # Bottom surface — concave well matching natural nail
-    z_bot_1d = arc_z_profile(us, W, C)
-    Z_bot    = np.tile(z_bot_1d, (nv, 1))
+    # ── Width profile and X grid ────────────────────────────
+    X = np.zeros_like(UU)
+    for j, v in enumerate(vs):
+        if v <= v_trans:
+            w_frac = 1.0
+        else:
+            t      = (v - v_trans) / max(1.0 - v_trans, 1e-9)
+            w_frac = shape_width(shape, t)
+        half      = (W / 2.0) * w_frac
+        X[j, :]   = (W / 2.0) + (us - 0.5) * 2.0 * half
 
-    # Wall thickness: TC at centre → TW at edges; 8% taper toward free tip
+    Y = VV * L
+
+    # ── Bottom surface: C-curve scales with local width ─────
+    # Same arc radius R throughout — sagitta naturally smaller as nail narrows
+    Z_bot = np.zeros_like(UU)
+    for j, v in enumerate(vs):
+        if v <= v_trans:
+            local_w = W
+        else:
+            t       = (v - v_trans) / max(1.0 - v_trans, 1e-9)
+            local_w = W * shape_width(shape, t)
+        # Derive sagitta from constant R and local width
+        half_w = local_w / 2.0
+        under  = R_arc**2 - half_w**2
+        c_local = R_arc - np.sqrt(max(under, 0.0)) if under > 0 else 0.0
+        Z_bot[j, :] = arc_z_profile(us, local_w, c_local)
+
+    # ── Wall thickness → top surface ────────────────────────
     u_center_dist = np.abs(us - 0.5) * 2.0
     thick_u       = TC - (TC - TW) * u_center_dist
     tip_taper_v   = 1.0 - 0.08 * vs
     Thick         = np.outer(tip_taper_v, thick_u)
+    Z_top         = Z_bot + Thick
 
-    Z_top = Z_bot + Thick
-    X     = UU * W
-    Y     = VV * L
-
+    # ── Triangulate surfaces ────────────────────────────────
     all_tris = []
-    all_tris.extend(grid_to_tris(X, Y, Z_top, flip=False))         # top surface
-    all_tris.extend(grid_to_tris(X, Y, Z_bot, flip=True))          # bottom surface
+    all_tris.extend(grid_to_tris(X, Y, Z_top, flip=False))         # top
+    all_tris.extend(grid_to_tris(X, Y, Z_bot, flip=True))          # bottom
 
     l_top = np.column_stack([X[:, 0],  Y[:, 0],  Z_top[:, 0]])
     l_bot = np.column_stack([X[:, 0],  Y[:, 0],  Z_bot[:, 0]])
@@ -469,6 +497,61 @@ def print_curve_options():
 
 
 # ─────────────────────────────────────────────────────────────
+# Tip shape profiles  (plan view — top-down outline of free tip)
+# ─────────────────────────────────────────────────────────────
+# Each shape defines how the free-tip extension tapers when viewed
+# from above. The nail-bed portion always stays at full width.
+#
+# shape_width(shape, v_local) → fraction of full nail width [0..1]
+#   v_local = 0  : start of tip extension  (full width)
+#   v_local = 1  : free end of tip
+
+VALID_SHAPES = ["square", "squoval", "oval", "almond", "ballerina", "stiletto"]
+
+SHAPE_DESCRIPTIONS = {
+    "square":    "flat straight edge, full width all the way",
+    "squoval":   "square with softly rounded corners",
+    "oval":      "gentle elliptical taper (most natural)",
+    "almond":    "narrower taper to a soft rounded point",
+    "ballerina": "straight taper to a flat narrow tip (coffin)",
+    "stiletto":  "tapers to a sharp point",
+}
+
+
+def shape_width(shape: str, v_local: float) -> float:
+    """
+    Return the half-width fraction [0..1] for a given shape at position
+    v_local (0 = tip base, 1 = free end of tip).
+    """
+    v = max(0.0, min(1.0, v_local))
+    if shape == "square":
+        return 1.0
+    elif shape == "squoval":
+        # Wide for most of the tip, only rounds off near the free edge.
+        # cos(v·π/2)^0.2 stays above 0.9 until v≈0.8, then drops smoothly.
+        # Fully monotonic — no flat section that causes degenerate triangles.
+        return float(max(np.cos(v * np.pi / 2.0) ** 0.2, 0.01))
+    elif shape == "oval":
+        return float(np.cos(v * np.pi / 2.1))
+    elif shape == "almond":
+        return max(1.0 - v * 0.95, 0.02)
+    elif shape == "ballerina":
+        return max(1.0 - v * 0.62, 0.35)
+    elif shape == "stiletto":
+        return max(1.0 - v * 0.98, 0.01)
+    return 1.0                          # fallback = square
+
+
+def print_shape_options():
+    """Print the available tip shapes to the terminal."""
+    print("\n  Available tip shapes (--shape):")
+    print(f"  {'─'*60}")
+    for name in VALID_SHAPES:
+        print(f"  {name:<12}  {SHAPE_DESCRIPTIONS[name]}")
+    print(f"  {'─'*60}\n")
+
+
+# ─────────────────────────────────────────────────────────────
 # Build all STLs for one hand
 # ─────────────────────────────────────────────────────────────
 
@@ -476,6 +559,7 @@ def build_all(json_path: str, hand: str, tip_length: float,
               c_override: float | None, output_dir: str,
               wall_thick: float, center_thick: float,
               curve: str | None = None,
+              shape: str = "square",
               fingers_filter: list | None = None) -> list:
     """
     Generate STL files for one hand and write print_manifest.json.
@@ -514,6 +598,7 @@ def build_all(json_path: str, hand: str, tip_length: float,
         lv = C_CURVE_LEVELS[curve]
         print(f"  C-curve: {curve}  ({lv['label']}, "
               f"{lv['example_mm']:.1f} mm on 10 mm nail)")
+    print(f"  Shape  : {shape}  ({SHAPE_DESCRIPTIONS.get(shape, '')})")
     print(f"\n  {'─'*72}")
     print(f"  {'Finger':<8} {'W(mm)':>7} {'L(mm)':>7} {'Tip(mm)':>8} "
           f"{'C(mm)':>7}  {'Overall vs standard':<22}  File")
@@ -540,6 +625,7 @@ def build_all(json_path: str, hand: str, tip_length: float,
             "length_mm":       m["length_mm"],
             "c_curve_mm":      C_cross,
             "tip_length_mm":   tip_length,
+            "tip_shape":       shape,
             "wall_thick_mm":   wall_thick,
             "center_thick_mm": center_thick,
         }
@@ -574,6 +660,8 @@ def build_all(json_path: str, hand: str, tip_length: float,
         "overall_hand_size":   hand_size_info,
         "curve_level":         curve if curve else "custom",
         "curve_label":         C_CURVE_LEVELS[curve]["label"] if curve else "custom values",
+        "tip_shape":           shape,
+        "tip_shape_description": SHAPE_DESCRIPTIONS.get(shape, ""),
         "source_measurements": json_path,
         "tip_length_mm":       tip_length,
         "wall_thick_mm":       wall_thick,
@@ -657,6 +745,16 @@ if __name__ == "__main__":
     p.add_argument("--c-curve-override", type=float, default=None,
                    help="Override cross-section C-curve for all fingers (mm). "
                         "Omit to use per-finger anatomical defaults (2.8–3.5 mm).")
+    p.add_argument("--shape",           default="square",
+                   choices=VALID_SHAPES,
+                   help="Tip shape (plan-view outline of the free edge):\n"
+                        "  square    = flat edge, full width\n"
+                        "  squoval   = square with rounded corners\n"
+                        "  oval      = elliptical taper (default natural look)\n"
+                        "  almond    = narrower taper to a soft point\n"
+                        "  ballerina = tapers to a flat narrow tip (coffin)\n"
+                        "  stiletto  = tapers to a sharp point\n"
+                        "(default: square)")
     p.add_argument("--curve",           default=None,
                    choices=["flat", "medium", "steep"],
                    help="C-curve preset for the nail tip cross-section.\n"
@@ -687,5 +785,6 @@ if __name__ == "__main__":
         wall_thick     = args.wall_thick,
         center_thick   = args.center_thick,
         curve          = args.curve,
+        shape          = args.shape,
         fingers_filter = [args.finger] if args.finger else None,
     )
