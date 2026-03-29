@@ -334,8 +334,8 @@ def generate_nail_tip_stl(params: dict, output_path: str,
       c_curve_mm       Arc sagitta across the width (cross-section curvature)
       tip_length_mm    Free-tip extension length beyond fingertip
       tip_shape        One of: square / squoval / oval / almond / ballerina / stiletto
-      wall_thick_mm    Wall thickness at the side edges   (default 0.5)
-      center_thick_mm  Wall thickness at the centre line  (default 0.8)
+      wall_thick_mm    Wall thickness at the side edges   (default 1.5)
+      center_thick_mm  Wall thickness at the centre line  (default 1.8)
 
     The nail-bed portion (v=0 → v_trans) is always full width.
     The tip extension (v_trans → 1) follows the chosen shape profile.
@@ -347,8 +347,8 @@ def generate_nail_tip_stl(params: dict, output_path: str,
     L_tp  = float(params["tip_length_mm"])
     L     = L_nb + L_tp
     C     = float(params["c_curve_mm"])
-    TW    = float(params.get("wall_thick_mm",   0.5))
-    TC    = float(params.get("center_thick_mm", 0.8))
+    TW    = float(params.get("wall_thick_mm",   1.5))
+    TC    = float(params.get("center_thick_mm", 1.8))
     shape = str(params.get("tip_shape", "square"))
 
     # Arc radius from the base C-curve — stays constant as tip narrows
@@ -762,10 +762,10 @@ if __name__ == "__main__":
                         "  medium = slightly curved (3.2 mm on a 10 mm nail)\n"
                         "  steep  = very curved     (4.8 mm on a 10 mm nail)\n"
                         "Omit to use per-finger anatomical defaults.")
-    p.add_argument("--wall-thick",       type=float, default=0.5,
-                   help="Wall thickness at side edges in mm (default: 0.5)")
-    p.add_argument("--center-thick",     type=float, default=0.8,
-                   help="Wall thickness at centre line in mm (default: 0.8)")
+    p.add_argument("--wall-thick",       type=float, default=1.5,
+                   help="Wall thickness at side edges in mm (default: 1.5)")
+    p.add_argument("--center-thick",     type=float, default=1.8,
+                   help="Wall thickness at centre line in mm (default: 1.8)")
     p.add_argument("--finger",           default=None,
                    help="Generate only this finger "
                         "(thumb / index / middle / ring / pinky)")
