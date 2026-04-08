@@ -647,7 +647,7 @@ def build_all(json_path: str, hand: str, tip_length: float,
               f"{os.path.basename(out_file)}")
 
     print(f"  {'─'*72}")
-    print(f"\n  ✅  {len(summary)} STL file(s) saved to '{hand_dir}/'")
+    print(f"\n  {len(summary)} STL file(s) saved to '{hand_dir}/'")
 
     # ── Overall hand size (middle finger vs standard) ────────
     hand_size_info = overall_hand_size(nails)
