@@ -132,7 +132,9 @@ def generate_stl(params, output_path):
     arc_r     = float(params["arc_radius_mm"])
     THICK     = float(params.get("thickness_mm", 2.0))
     W         = float(params["width_mm"])
-    L         = float(params["length_mm"])
+    # Prefer corrected_length_mm when the measurer flagged the raw length as
+    # suspect (nail tip not fully visible in photo).
+    L         = float(params.get("corrected_length_mm") or params["length_mm"])
     L_ext     = float(params.get("tip_extension_mm", 1.0))
     CUT_DEPTH = float(params.get("cuticle_depth_mm", 1.5))
     x_cen     = W / 2.0
@@ -288,13 +290,14 @@ def main():
               f"C={nail['c_curve_mm']}mm  R={nail['arc_radius_mm']}mm")
 
         params = {
-            "c_curve_mm":       nail["c_curve_mm"],
-            "arc_radius_mm":    nail["arc_radius_mm"],
-            "width_mm":         nail["width_mm"],
-            "length_mm":        nail["length_mm"],
-            "tip_extension_mm": args.tip_extension,
-            "cuticle_depth_mm": args.cuticle_depth,
-            "thickness_mm":     args.thickness,
+            "c_curve_mm":          nail["c_curve_mm"],
+            "arc_radius_mm":       nail["arc_radius_mm"],
+            "width_mm":            nail["width_mm"],
+            "length_mm":           nail["length_mm"],
+            "corrected_length_mm": nail.get("corrected_length_mm"),
+            "tip_extension_mm":    args.tip_extension,
+            "cuticle_depth_mm":    args.cuticle_depth,
+            "thickness_mm":        args.thickness,
         }
 
         out   = os.path.join(args.output, f"nail_{finger}_exact.stl")
