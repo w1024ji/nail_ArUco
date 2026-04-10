@@ -560,7 +560,8 @@ def build_all(json_path: str, hand: str, tip_length: float,
               wall_thick: float, center_thick: float,
               curve: str | None = None,
               shape: str = "square",
-              fingers_filter: list | None = None) -> list:
+              fingers_filter: list | None = None,
+              use_measured_ccurve: bool = True) -> list:
     """
     Generate STL files for one hand and write print_manifest.json.
 
@@ -611,11 +612,18 @@ def build_all(json_path: str, hand: str, tip_length: float,
 
         m = nails[finger]
 
-        # Resolve C-curve: --curve preset > --c-curve-override > anatomical default
+        # Resolve C-curve priority:
+        #   1. --curve preset  (explicit user override)
+        #   2. --c-curve-override (explicit mm value)
+        #   3. measured c_curve_mm from nail_measurer_v6 JSON  ← NEW
+        #   4. anatomical default (fallback)
         if curve:
             C_cross = ccurve_for_finger(curve, m["width_mm"])
         elif c_override:
             C_cross = c_override
+        elif use_measured_ccurve and m.get("c_curve_mm") and float(m["c_curve_mm"]) > 0.1:
+            C_cross = float(m["c_curve_mm"])
+            print(f"  [c-curve] {finger}: using measured value {C_cross}mm")
         else:
             C_cross = DEFAULT_CROSS_SECTION_C.get(finger, 3.0)
         size_cmp = compare_to_standard(finger, m["width_mm"], m["length_mm"])
@@ -651,8 +659,12 @@ def build_all(json_path: str, hand: str, tip_length: float,
 
     # ── Overall hand size (middle finger vs standard) ────────
     hand_size_info = overall_hand_size(nails)
-    print(f"  Overall hand size : {hand_size_info['hand_size'].upper()}"
-          f"  (middle finger avg diff: {hand_size_info['avg_diff_mm']:+.2f} mm vs standard)\n")
+    if "avg_diff_mm" in hand_size_info:
+        print(f"  Overall hand size : {hand_size_info['hand_size'].upper()}"
+              f"  (middle finger avg diff: {hand_size_info['avg_diff_mm']:+.2f} mm vs standard)\n")
+    else:
+        print(f"  Overall hand size : {hand_size_info['hand_size'].upper()}"
+              f"  ({hand_size_info.get('note', '')})\n")
 
     # ── Write print_manifest.json ────────────────────────────
     manifest = {
@@ -769,22 +781,35 @@ if __name__ == "__main__":
     p.add_argument("--finger",           default=None,
                    help="Generate only this finger "
                         "(thumb / index / middle / ring / pinky)")
+    p.add_argument("--exact-fit",        action="store_true",
+                   help="Generate STL exactly matching natural nail size "
+                        "(tip_length=0, uses measured c_curve). "
+                        "This is the mid-term validation mode.")
+    p.add_argument("--no-measured-ccurve", action="store_true",
+                   help="Ignore measured c_curve from JSON and use anatomical defaults instead.")
 
     args = p.parse_args()
 
-    # If no --curve given, print the options as a helpful reminder
-    if args.curve is None and args.c_curve_override is None:
+    # --exact-fit shortcut: zero extension, use measured c-curve
+    if args.exact_fit:
+        args.tip_length = 0.0
+        print("\n  [exact-fit mode] tip_length=0, using measured c-curve from JSON")
+
+    # If no --curve given and not using measured, print options
+    if (args.curve is None and args.c_curve_override is None
+            and args.no_measured_ccurve and not args.exact_fit):
         print_curve_options()
 
     build_all(
-        json_path      = args.measurements,
-        hand           = args.hand,
-        tip_length     = args.tip_length,
-        c_override     = args.c_curve_override,
-        output_dir     = args.output,
-        wall_thick     = args.wall_thick,
-        center_thick   = args.center_thick,
-        curve          = args.curve,
-        shape          = args.shape,
-        fingers_filter = [args.finger] if args.finger else None,
+        json_path            = args.measurements,
+        hand                 = args.hand,
+        tip_length           = args.tip_length,
+        c_override           = args.c_curve_override,
+        output_dir           = args.output,
+        wall_thick           = args.wall_thick,
+        center_thick         = args.center_thick,
+        curve                = args.curve,
+        shape                = args.shape,
+        fingers_filter       = [args.finger] if args.finger else None,
+        use_measured_ccurve  = not args.no_measured_ccurve,
     )

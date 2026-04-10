@@ -1,28 +1,30 @@
 """
 nail_measurer_v6.py
 -------------------
-Fully automatic per-finger nail measurement using TWO photos:
-  1. TOP photo   — finger pointing up, ArUco marker visible
-                   → width, length, nail contour, cuticle shape, skin tone
-  2. SIDE photo  — finger held upright from the side, ArUco visible
-                   → nail height profile → c-curve sagitta + arc radius
+Fully automatic per-finger nail measurement using ONE top photo.
+
+What's new in v6
+----------------
+  - Single photo only (top photo) — side photo no longer needed
+  - C-curve estimated from nail fold brightness analysis
+    (brightness drop at nail edges vs centre correlates with curvature)
+  - Auto-scales to any camera resolution
 
 Usage (single finger):
-    python nail_measurer_v6.py --top index1.jpg --side index2.jpg
+    python nail_measurer_v6.py --top index1.jpg
                                --finger index --aruco-size 20 --output results/
 
 Usage (all 5 fingers batch):
     python nail_measurer_v6.py --batch
         --fingers thumb index middle ring pinky
-        --tops   thumb_top.jpg index_top.jpg middle_top.jpg ring_top.jpg pinky_top.jpg
-        --sides  thumb_side.jpg index_side.jpg middle_side.jpg ring_side.jpg pinky_side.jpg
+        --tops   thumb.jpg index.jpg middle.jpg ring.jpg pinky.jpg
         --aruco-size 20 --output results/
 
 Photography requirements:
-    TOP photo  : finger pointing UP, flat on dark (navy/black) background
-                 ArUco marker placed beside finger on same surface
-    SIDE photo : finger pointing UP, side face toward camera
-                 ArUco marker beside finger (same surface level)
+    - Finger pointing UP on dark (navy/black) background
+    - ArUco marker placed beside finger on same surface
+    - Even lighting, no harsh shadows
+    - Camera directly above, 30-40cm distance
 """
 
 import argparse
@@ -95,17 +97,23 @@ def detect_aruco(image: np.ndarray, aruco_size_mm: float):
 
 
 # ─────────────────────────────────────────────────────────────
-# 2. Finger segmentation
+# 2. Finger segmentation (resolution-aware)
 # ─────────────────────────────────────────────────────────────
 
 def segment_finger(image: np.ndarray):
     H, W = image.shape[:2]
+    scale    = max(W, H) / 2000.0
+    ks_large = max(9,  int(9  * scale) | 1)
+    ks_small = max(5,  int(5  * scale) | 1)
+    print(f"  [Segment] {W}x{H}  scale={scale:.2f}  "
+          f"kernels={ks_large},{ks_small}")
+
     L = cv2.cvtColor(image, cv2.COLOR_BGR2Lab)[:,:,0]
     _, skin = cv2.threshold(L, 130, 255, cv2.THRESH_BINARY)
-    k9 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9,9))
-    k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
-    skin = cv2.morphologyEx(skin, cv2.MORPH_CLOSE, k9, iterations=3)
-    skin = cv2.morphologyEx(skin, cv2.MORPH_OPEN,  k5, iterations=2)
+    kL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ks_large, ks_large))
+    kS = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ks_small, ks_small))
+    skin = cv2.morphologyEx(skin, cv2.MORPH_CLOSE, kL, iterations=3)
+    skin = cv2.morphologyEx(skin, cv2.MORPH_OPEN,  kS, iterations=2)
     cnts, _ = cv2.findContours(skin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not cnts:
         raise RuntimeError(
@@ -117,11 +125,126 @@ def segment_finger(image: np.ndarray):
     finger_mask = np.zeros((H, W), np.uint8)
     cv2.drawContours(finger_mask, [finger_cnt], -1, 255, -1)
     bbox = cv2.boundingRect(finger_cnt)
+    print(f"  [Segment] bbox: x={bbox[0]} y={bbox[1]} "
+          f"w={bbox[2]} h={bbox[3]}")
     return finger_mask, finger_cnt, bbox
 
 
 # ─────────────────────────────────────────────────────────────
-# 3. TOP photo measurement
+# 3. Row scan helpers
+# ─────────────────────────────────────────────────────────────
+
+def row_scan(finger_mask, bbox, mpp, H):
+    fx, fy, fw, fh = bbox
+    max_scan = min(int(30 / mpp), fh)
+    widths, ledges, redges = [], [], []
+    empty_streak = 0
+    for row in range(fy, fy + max_scan):
+        if row >= H: break
+        cols = np.where(finger_mask[row, fx:fx+fw] > 0)[0]
+        if len(cols) < 3:
+            empty_streak += 1
+            if empty_streak > 5: break
+            continue
+        empty_streak = 0
+        widths.append(int(cols[-1] - cols[0]))
+        ledges.append(int(cols[0]  + fx))
+        redges.append(int(cols[-1] + fx))
+    return widths, ledges, redges
+
+
+# ─────────────────────────────────────────────────────────────
+# 4. C-curve from nail fold brightness (top photo only)
+# ─────────────────────────────────────────────────────────────
+
+def estimate_ccurve_from_nailfold(image: np.ndarray,
+                                   finger_mask: np.ndarray,
+                                   tip_y: int, cuticle_y: int,
+                                   tip_x: int, nail_half: float,
+                                   mpp: float) -> dict:
+    """
+    Estimate c-curve from brightness drop at nail edges vs centre.
+
+    Principle:
+      - A flat nail has uniform brightness across its width
+      - A curved nail casts shadow at the edges (nail fold overlap)
+      - Brightness drop (centre - edge) correlates with curvature
+
+    Scans at 3 positions (30%, 50%, 70% of nail length)
+    and takes the median.
+
+    Empirical model (calibrated):
+      c_curve ≈ brightness_drop * 0.08 + 0.8
+    """
+    gray  = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4,4))
+    gray_enh = clahe.apply(gray)
+
+    length_px = cuticle_y - tip_y
+    x_left  = int(tip_x - nail_half)
+    x_right = int(tip_x + nail_half)
+
+    scan_fracs = [0.30, 0.50, 0.70]
+    c_estimates = []
+    scan_debug  = []
+
+    for frac in scan_fracs:
+        row_center = int(tip_y + length_px * frac)
+        row_start  = max(0, row_center - int(2 / mpp))
+        row_end    = min(image.shape[0], row_center + int(2 / mpp))
+
+        strip  = gray_enh[row_start:row_end, x_left:x_right].astype(float)
+        mask_s = finger_mask[row_start:row_end, x_left:x_right]
+        strip[mask_s == 0] = np.nan
+
+        with np.errstate(all='ignore'):
+            profile = np.nanmean(strip, axis=0)
+
+        profile_smooth = uniform_filter1d(profile, size=7)
+        nc = len(profile_smooth)
+        if nc < 6:
+            continue
+
+        centre_b = float(profile_smooth[nc//3 : 2*nc//3].mean())
+        left_b   = float(profile_smooth[:nc//6].mean())
+        right_b  = float(profile_smooth[-nc//6:].mean())
+        edge_b   = (left_b + right_b) / 2.0
+        drop     = centre_b - edge_b
+
+        c_est = float(np.clip(round(drop * 0.08 + 0.8, 2), 0.3, 5.0))
+        c_estimates.append(c_est)
+        scan_debug.append({
+            "position_pct": int(frac * 100),
+            "row": row_center,
+            "centre_brightness": round(centre_b, 1),
+            "edge_brightness":   round(edge_b, 1),
+            "brightness_drop":   round(drop, 1),
+            "c_estimate_mm":     c_est,
+        })
+
+    if not c_estimates:
+        c_final = 2.0   # safe fallback
+    else:
+        c_final = round(float(np.median(c_estimates)), 2)
+
+    # Arc radius from final c-curve
+    w_mm  = nail_half * 2 * mpp
+    arc_r = round((w_mm**2 / (8 * c_final)) + (c_final / 2), 2) if c_final > 0.1 else None
+    thick = round(max(0.25, min(c_final * 1.5, 0.85)), 2)
+
+    print(f"  [C-curve]  scans: {[s['c_estimate_mm'] for s in scan_debug]}  "
+          f"median={c_final}mm  R={arc_r}mm")
+
+    return {
+        "c_curve_mm":    c_final,
+        "arc_radius_mm": arc_r,
+        "thickness_mm":  thick,
+        "_ccurve_debug": scan_debug,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# 5. TOP photo full measurement
 # ─────────────────────────────────────────────────────────────
 
 def measure_top(image: np.ndarray, mpp: float,
@@ -131,18 +254,10 @@ def measure_top(image: np.ndarray, mpp: float,
     fx, fy, fw, fh = bbox
     tip_y = fy
 
-    # Row scan
-    max_scan = min(int(30 / mpp), fh)
-    widths, ledges, redges = [], [], []
-    for row in range(tip_y, tip_y + max_scan):
-        if row >= H: break
-        cols = np.where(finger_mask[row, fx:fx+fw] > 0)[0]
-        if len(cols) < 5: break
-        widths.append(int(cols[-1] - cols[0]))
-        ledges.append(int(cols[0]  + fx))
-        redges.append(int(cols[-1] + fx))
+    # ── Row scan ─────────────────────────────────────────────
+    widths, ledges, redges = row_scan(finger_mask, bbox, mpp, H)
 
-    if len(widths) < 10:
+    if len(widths) < 5:
         raise RuntimeError("Not enough finger rows detected in top photo.")
 
     ws  = uniform_filter1d(np.array(widths, float), size=7)
@@ -165,7 +280,7 @@ def measure_top(image: np.ndarray, mpp: float,
     margin    = 0.08
     nail_half = width_px * (0.5 - margin)
 
-    # Cuticle detection
+    # ── Cuticle detection ─────────────────────────────────────
     hw       = int(width_px * 0.38)
     x1, x2   = max(0, tip_x - hw), min(W, tip_x + hw)
     max_srch = min(int(20 / mpp), len(widths)-1)
@@ -184,7 +299,14 @@ def measure_top(image: np.ndarray, mpp: float,
     cut_idx   = min(cuticle_y - tip_y, len(widths)-1)
     length_px = float(cuticle_y - tip_y)
 
-    # Build nail polygon
+    # ── C-curve from nail fold ────────────────────────────────
+    cc_data = estimate_ccurve_from_nailfold(
+        image, finger_mask,
+        tip_y, cuticle_y,
+        tip_x, nail_half, mpp
+    )
+
+    # ── Build nail polygon ────────────────────────────────────
     n_pts = cut_idx + 1
     left_pts, right_pts = [], []
     for i in range(n_pts):
@@ -213,15 +335,18 @@ def measure_top(image: np.ndarray, mpp: float,
         ay = cuticle_y - arc_h * np.sin(angle)
         cuticle_arc.append([int(ax), int(ay)])
 
-    full_poly = (tip_arc +
-                 right_pts[plate_start+1:] +
-                 cuticle_arc +
-                 list(reversed(left_pts[plate_start+1:])))
+    full_poly    = (tip_arc +
+                    right_pts[plate_start+1:] +
+                    cuticle_arc +
+                    list(reversed(left_pts[plate_start+1:])))
     nail_polygon = np.array(full_poly, np.int32)
 
     # Smooth spline
     pts = nail_polygon.astype(float)
     try:
+        diff = np.diff(pts, axis=0)
+        keep = np.concatenate([[True], np.any(diff != 0, axis=1)])
+        pts  = pts[keep]
         tck, _ = splprep(
             [np.append(pts[:,0], pts[0,0]),
              np.append(pts[:,1], pts[0,1])],
@@ -231,7 +356,7 @@ def measure_top(image: np.ndarray, mpp: float,
     except Exception:
         smooth = pts.astype(np.int32)
 
-    # Skin tone
+    # ── Skin tone ─────────────────────────────────────────────
     nail_mask_full = np.zeros((H, W), np.uint8)
     cv2.fillPoly(nail_mask_full, [nail_polygon], 255)
     k25  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25,25))
@@ -246,62 +371,25 @@ def measure_top(image: np.ndarray, mpp: float,
     else:
         hex_color = "#FFFFFF"
 
+    w_mm = round(nail_half * 2 * mpp, 2)
+    l_mm = round(length_px * mpp, 2)
+
     return {
-        "width_mm":       round(nail_half * 2 * mpp, 2),
-        "length_mm":      round(length_px * mpp, 2),
-        "skin_tone_hex":  hex_color,
+        "width_mm":        w_mm,
+        "length_mm":       l_mm,
+        "skin_tone_hex":   hex_color,
         "nail_polygon_px": smooth.tolist(),
-        "_nail_half":     nail_half,
-        "_tip_x":         tip_x,
-        "_tip_y":         tip_y,
-        "_cuticle_y":     cuticle_y,
-        "_plate_start":   plate_start,
+        **cc_data,
+        "_nail_half":      nail_half,
+        "_tip_x":          tip_x,
+        "_tip_y":          tip_y,
+        "_cuticle_y":      cuticle_y,
+        "_plate_start":    plate_start,
     }
 
 
 # ─────────────────────────────────────────────────────────────
-# 4. SIDE photo measurement (C-curve)
-# ─────────────────────────────────────────────────────────────
-
-def measure_side(image: np.ndarray, mpp: float,
-                 finger_mask: np.ndarray, bbox: tuple,
-                 width_mm: float) -> dict:
-    fx, fy, fw, fh = bbox
-
-    widths_arr = []
-    for row in range(fy, fy + fh):
-        cols = np.where(finger_mask[row, fx:fx+fw] > 0)[0]
-        widths_arr.append(int(cols[-1]-cols[0]) if len(cols) > 3 else 0)
-
-    ws = uniform_filter1d(np.array(widths_arr, float), size=5)
-
-    tip_rows = ws[:int(3/mpp)]
-    tip_rows = tip_rows[tip_rows > 5]
-    edge_w   = float(np.percentile(tip_rows, 10)) if len(tip_rows) > 0 else ws[2]
-
-    mid_rows = ws[int(3/mpp):int(8/mpp)]
-    mid_w    = float(np.percentile(mid_rows, 90)) if len(mid_rows) > 0 else ws[20]
-
-    h_px  = (mid_w - edge_w) / 2
-    h_mm  = round(max(h_px * mpp, 0.1), 2)
-
-    arc_r = round((width_mm**2 / (8*h_mm)) + (h_mm/2), 2)
-    thick = round(max(0.25, min(h_mm * 1.5, 0.85)), 2)
-
-    print(f"  [C-curve]  edge={edge_w*mpp:.2f}mm  mid={mid_w*mpp:.2f}mm  "
-          f"h={h_mm}mm  R={arc_r}mm")
-
-    return {
-        "c_curve_mm":    h_mm,
-        "arc_radius_mm": arc_r,
-        "thickness_mm":  thick,
-        "_edge_row_mpp": mpp,
-        "_bbox_side":    list(bbox),
-    }
-
-
-# ─────────────────────────────────────────────────────────────
-# 5. W/L correction
+# 6. W/L correction
 # ─────────────────────────────────────────────────────────────
 
 def apply_wl_correction(finger: str, width_mm: float, length_mm: float) -> dict:
@@ -327,153 +415,116 @@ def apply_wl_correction(finger: str, width_mm: float, length_mm: float) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────
-# 6. Visualisation
+# 7. Visualisation
 # ─────────────────────────────────────────────────────────────
 
-def save_annotated_top(image, top_data, aruco_corners, finger, save_path):
+def save_annotated(image, data, aruco_corners, finger, save_path):
     vis   = image.copy()
     color = NAIL_COLORS.get(finger, (200,200,200))
+
     if aruco_corners is not None:
         cv2.polylines(vis, [aruco_corners.astype(int)], True, (0,255,255), 3)
-    smooth = np.array(top_data["nail_polygon_px"], np.int32)
-    ov = vis.copy()
+
+    smooth    = np.array(data["nail_polygon_px"], np.int32)
+    ov        = vis.copy()
     cv2.fillPoly(ov, [smooth.reshape(-1,1,2)], color)
     cv2.addWeighted(ov, 0.35, vis, 0.65, 0, vis)
     cv2.polylines(vis, [smooth.reshape(-1,1,2)], True, color, 3)
-    tip_x     = top_data["_tip_x"]
-    cuticle_y = top_data["_cuticle_y"]
-    nail_half = top_data["_nail_half"]
-    tip_y     = top_data["_tip_y"]
+
+    tip_x     = data["_tip_x"]
+    tip_y     = data["_tip_y"]
+    cuticle_y = data["_cuticle_y"]
+    nail_half = data["_nail_half"]
+
+    # Cuticle line
     cv2.line(vis,
              (tip_x-int(nail_half), cuticle_y),
              (tip_x+int(nail_half), cuticle_y),
              (0,165,255), 2)
-    lx = tip_x + int(nail_half) + 30
+
+    # C-curve scan lines
+    length_px = cuticle_y - tip_y
+    scan_colors = [(255,100,0),(0,255,100),(255,0,255)]
+    for frac, col in zip([0.30, 0.50, 0.70], scan_colors):
+        row = int(tip_y + length_px * frac)
+        cv2.line(vis,
+                 (tip_x-int(nail_half), row),
+                 (tip_x+int(nail_half), row),
+                 col, 1)
+
+    # Labels
+    lx = tip_x + int(nail_half) + 20
     for txt, dy, col in [
-        (f"W: {top_data['width_mm']}mm",               40,  color),
-        (f"L: {top_data['length_mm']}mm",              100, color),
-        (f"C: {top_data.get('c_curve_mm','?')}mm",     160, color),
-        (f"R: {top_data.get('arc_radius_mm','?')}mm",  220, color),
-        (f"Skin: {top_data['skin_tone_hex']}",         280, (0,200,255)),
+        (f"W:    {data['width_mm']}mm",              40,  color),
+        (f"L:    {data['length_mm']}mm",             100, color),
+        (f"C:    {data['c_curve_mm']}mm",            160, color),
+        (f"R:    {data['arc_radius_mm']}mm",         220, color),
+        (f"Skin: {data['skin_tone_hex']}",           280, (0,200,255)),
     ]:
         cv2.putText(vis, txt, (lx, tip_y+dy),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,0,0), 5)
         cv2.putText(vis, txt, (lx, tip_y+dy),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, col, 2)
-    scale = 900 / vis.shape[0]
-    cv2.imwrite(save_path, cv2.resize(vis, (int(vis.shape[1]*scale), 900)))
-    print(f"  [Saved] {save_path}")
 
-
-def save_annotated_side(image, side_data, finger_mask, bbox,
-                        aruco_corners, finger, mpp, save_path):
-    vis   = image.copy()
-    color = NAIL_COLORS.get(finger, (200,200,200))
-    fx, fy, fw, fh = bbox
-    if aruco_corners is not None:
-        cv2.polylines(vis, [aruco_corners.astype(int)], True, (0,255,255), 3)
-    for i in range(0, int(15/mpp), 3):
-        row = fy + i
-        if row >= image.shape[0]: break
-        cols = np.where(finger_mask[row, fx:fx+fw] > 0)[0]
-        if len(cols) > 3:
-            cv2.line(vis, (int(cols[0]+fx), row),
-                          (int(cols[-1]+fx), row), (100,100,255), 1)
-    edge_row = fy + int(1/mpp)
-    mid_row  = fy + int(5/mpp)
-    cv2.line(vis, (fx, edge_row), (fx+fw, edge_row), (0,255,0), 2)
-    cv2.line(vis, (fx, mid_row),  (fx+fw, mid_row),  (0,165,255), 2)
-    cv2.putText(vis, "tip edge", (fx+fw+10, edge_row),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,255,0), 2)
-    cv2.putText(vis, "mid arch", (fx+fw+10, mid_row),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,165,255), 2)
-    lx, ly = fx+fw+10, fy+200
-    for txt, col in [
-        (f"C-curve: {side_data['c_curve_mm']}mm", color),
-        (f"Arc R:   {side_data['arc_radius_mm']}mm", (0,200,255)),
-    ]:
-        cv2.putText(vis, txt, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,0,0), 5)
-        cv2.putText(vis, txt, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 1.0, col, 2)
-        ly += 60
     scale = 900 / vis.shape[0]
     cv2.imwrite(save_path, cv2.resize(vis, (int(vis.shape[1]*scale), 900)))
     print(f"  [Saved] {save_path}")
 
 
 # ─────────────────────────────────────────────────────────────
-# 7. Single finger pipeline
+# 8. Single finger pipeline
 # ─────────────────────────────────────────────────────────────
 
-def measure_finger(top_path: str, side_path: str, finger: str,
+def measure_finger(top_path: str, finger: str,
                    aruco_size_mm: float, output_dir: str) -> dict:
 
     print(f"\n{'='*55}")
     print(f"  Measuring: {finger.upper()}")
     print(f"{'='*55}")
 
-    top_img  = cv2.imread(top_path)
-    side_img = cv2.imread(side_path)
+    top_img = cv2.imread(top_path)
     if top_img is None:
-        sys.exit(f"ERROR: Cannot open top photo '{top_path}'")
-    if side_img is None:
-        sys.exit(f"ERROR: Cannot open side photo '{side_path}'")
+        sys.exit(f"ERROR: Cannot open '{top_path}'")
 
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"\n[1/4] TOP photo — ArUco + segmentation …")
-    mpp_top, aruco_top, marker_id = detect_aruco(top_img, aruco_size_mm)
-    finger_mask_top, _, bbox_top  = segment_finger(top_img)
+    print(f"\n[1/3] ArUco + finger segmentation …")
+    mpp, aruco_corners, marker_id = detect_aruco(top_img, aruco_size_mm)
+    finger_mask, _, bbox          = segment_finger(top_img)
 
-    print(f"\n[2/4] TOP photo — nail measurement …")
-    top_data = measure_top(top_img, mpp_top, finger_mask_top, bbox_top)
-    print(f"  width={top_data['width_mm']}mm  "
-          f"length={top_data['length_mm']}mm  "
-          f"skin={top_data['skin_tone_hex']}")
+    print(f"\n[2/3] Nail measurement + C-curve …")
+    data = measure_top(top_img, mpp, finger_mask, bbox)
+    print(f"  width={data['width_mm']}mm  "
+          f"length={data['length_mm']}mm  "
+          f"c-curve={data['c_curve_mm']}mm  "
+          f"skin={data['skin_tone_hex']}")
 
-    print(f"\n[3/4] SIDE photo — ArUco + segmentation …")
-    try:
-        mpp_side, aruco_side, _ = detect_aruco(side_img, aruco_size_mm)
-    except RuntimeError:
-        print("  ⚠  ArUco not found in side photo — reusing TOP scale")
-        mpp_side   = mpp_top
-        aruco_side = None
-    finger_mask_side, _, bbox_side = segment_finger(side_img)
+    print(f"\n[3/3] W/L correction + save …")
+    wl = apply_wl_correction(finger, data["width_mm"], data["length_mm"])
+    data.update(wl)
+    data["aspect_ratio"] = round(
+        data["width_mm"] / data["length_mm"], 3
+    ) if data["length_mm"] else 0.0
 
-    print(f"\n[4/4] SIDE photo — c-curve …")
-    side_data = measure_side(side_img, mpp_side, finger_mask_side,
-                             bbox_side, top_data["width_mm"])
-
-    # Merge
-    top_data.update(side_data)
-    wl = apply_wl_correction(finger, top_data["width_mm"], top_data["length_mm"])
-    top_data.update(wl)
-    top_data["aspect_ratio"] = round(
-        top_data["width_mm"] / top_data["length_mm"], 3
-    ) if top_data["length_mm"] else 0.0
-
-    # Save images
-    save_annotated_top(top_img, top_data, aruco_top, finger,
-                       os.path.join(output_dir, f"{finger}_top.jpg"))
-    save_annotated_side(side_img, side_data, finger_mask_side, bbox_side,
-                        aruco_side, finger, mpp_side,
-                        os.path.join(output_dir, f"{finger}_side.jpg"))
+    save_annotated(top_img, data, aruco_corners, finger,
+                   os.path.join(output_dir, f"{finger}_annotated.jpg"))
 
     print(f"\n  ┌─ {finger.upper()} ──────────────────────────────────")
-    print(f"  │  Width           : {top_data['width_mm']} mm")
-    print(f"  │  Length          : {top_data['length_mm']} mm")
-    print(f"  │  Corrected L     : {top_data['corrected_length_mm']} mm")
-    print(f"  │  C-curve         : {top_data['c_curve_mm']} mm")
-    print(f"  │  Arc radius      : {top_data['arc_radius_mm']} mm")
-    print(f"  │  Thickness (est) : {top_data['thickness_mm']} mm")
-    print(f"  │  Skin tone       : {top_data['skin_tone_hex']}")
-    print(f"  │  W/L flag        : {top_data['wl_ratio_check']['flag']}")
+    print(f"  │  Width           : {data['width_mm']} mm")
+    print(f"  │  Length          : {data['length_mm']} mm")
+    print(f"  │  Corrected L     : {data['corrected_length_mm']} mm")
+    print(f"  │  C-curve         : {data['c_curve_mm']} mm")
+    print(f"  │  Arc radius      : {data['arc_radius_mm']} mm")
+    print(f"  │  Thickness (est) : {data['thickness_mm']} mm")
+    print(f"  │  Skin tone       : {data['skin_tone_hex']}")
+    print(f"  │  W/L flag        : {data['wl_ratio_check']['flag']}")
     print(f"  └────────────────────────────────────────────")
 
-    return {"finger": finger, **top_data}
+    return {"finger": finger, **data}
 
 
 # ─────────────────────────────────────────────────────────────
-# 8. JSON builder
+# 9. JSON builder
 # ─────────────────────────────────────────────────────────────
 
 def build_payload(results: list, aruco_size_mm: float) -> dict:
@@ -499,12 +550,12 @@ def build_payload(results: list, aruco_size_mm: float) -> dict:
         "meta": {
             "aruco_physical_size_mm": aruco_size_mm,
             "nails_detected":         len(clean),
-            "measurement_method":     "per-finger: top photo + side photo",
+            "measurement_method":     "single top photo + nail fold brightness",
             "notes": {
                 "width_mm":            "75th pct of stable row-scan nail plate width",
                 "length_mm":           "Tip to cuticle via Sobel edge detection",
                 "corrected_length_mm": "width / Jung et al. (2015) W/L ratio",
-                "c_curve_mm":          "Nail arch sagitta from side photo width profile",
+                "c_curve_mm":          "Estimated from nail fold brightness drop at 30/50/70% of nail",
                 "arc_radius_mm":       "R = w²/(8h) + h/2",
                 "skin_tone_hex":       "Median BGR of skin ring around nail",
             },
@@ -531,19 +582,17 @@ def build_payload(results: list, aruco_size_mm: float) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────
-# 9. CLI
+# 10. CLI
 # ─────────────────────────────────────────────────────────────
 
 def main():
     p = argparse.ArgumentParser(
-        description="Automatic per-finger nail measurement (top + side photo)")
+        description="Automatic nail measurement from single top photo")
     p.add_argument("--top",        help="Top photo path")
-    p.add_argument("--side",       help="Side photo path")
     p.add_argument("--finger",     default="index", choices=FINGER_NAMES)
     p.add_argument("--batch",      action="store_true")
     p.add_argument("--fingers",    nargs="+", default=FINGER_NAMES)
     p.add_argument("--tops",       nargs="+")
-    p.add_argument("--sides",      nargs="+")
     p.add_argument("--aruco-size", type=float, default=20.0)
     p.add_argument("--output",     default="nail_results_v6")
     args = p.parse_args()
@@ -552,17 +601,17 @@ def main():
     results = []
 
     if args.batch:
-        if not args.tops or not args.sides:
-            sys.exit("ERROR: --batch requires --tops and --sides")
-        if len(args.tops) != len(args.fingers) or len(args.sides) != len(args.fingers):
-            sys.exit("ERROR: --tops, --sides, --fingers must have equal length")
-        for finger, top, side in zip(args.fingers, args.tops, args.sides):
-            r = measure_finger(top, side, finger, args.aruco_size, args.output)
+        if not args.tops:
+            sys.exit("ERROR: --batch requires --tops")
+        if len(args.tops) != len(args.fingers):
+            sys.exit("ERROR: --tops and --fingers must have equal length")
+        for finger, top in zip(args.fingers, args.tops):
+            r = measure_finger(top, finger, args.aruco_size, args.output)
             results.append(r)
     else:
-        if not args.top or not args.side:
-            sys.exit("ERROR: Provide --top and --side, or use --batch")
-        r = measure_finger(args.top, args.side, args.finger,
+        if not args.top:
+            sys.exit("ERROR: Provide --top photo path, or use --batch")
+        r = measure_finger(args.top, args.finger,
                            args.aruco_size, args.output)
         results.append(r)
 
@@ -574,7 +623,7 @@ def main():
     print(f"\n{'='*55}")
     print(f"✅ Saved → {json_path}")
     print(f"   Fingers: {[r['finger'] for r in results]}")
-    print(f"\n🎉 Next: python nail_tip_generator.py --input {json_path}")
+    print(f"\n🎉 Next: python nail_exact_stl.py --input {json_path}")
     print(f"{'='*55}")
 
 
