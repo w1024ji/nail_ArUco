@@ -61,6 +61,32 @@ NAIL_COLORS = {
     "pinky":  ( 80, 200, 200),
 }
 
+# Reference dimensions for per-finger size classification (Asian women,
+# Jung et al. 2015 + derived values — same source as nail_tip_generator.py).
+STANDARD_NAILS = {
+    "thumb":  {"width_mm": 12.1, "length_mm": 11.3},
+    "index":  {"width_mm":  9.1, "length_mm":  9.8},
+    "middle": {"width_mm":  9.6, "length_mm": 10.5},
+    "ring":   {"width_mm":  8.3, "length_mm":  9.8},
+    "pinky":  {"width_mm":  7.0, "length_mm":  8.2},
+}
+
+_SIZE_THRESHOLDS = [
+    (-2.0, "much_smaller"), (-1.0, "smaller"),
+    ( 1.0, "average"),      ( 2.0, "larger"), (float("inf"), "much_larger"),
+]
+
+def _size_category(diff_mm: float) -> str:
+    for threshold, label in _SIZE_THRESHOLDS:
+        if diff_mm < threshold:
+            return label
+    return "much_larger"
+
+def _overall_size(w_cat: str, l_cat: str) -> str:
+    rank = {"much_smaller": 0, "smaller": 1, "average": 2,
+            "larger": 3, "much_larger": 4}
+    return list(rank.keys())[round((rank[w_cat] + rank[l_cat]) / 2.0)]
+
 ARUCO_DICTS = {
     "4x4_50":  cv2.aruco.DICT_4X4_50,
     "4x4_100": cv2.aruco.DICT_4X4_100,
@@ -582,7 +608,38 @@ def build_payload(results: list, aruco_size_mm: float) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────
-# 10. CLI
+# 10. Profile builder (size classification + skin tone)
+# ─────────────────────────────────────────────────────────────
+
+def build_profile(results: list) -> list:
+    """
+    For each measured finger return a small profile dict with:
+      - finger name
+      - nail_size: per-finger size classification relative to Asian women
+                   standard (much_smaller / smaller / average / larger /
+                   much_larger)
+      - skin_tone: hex colour sampled from the skin ring around the nail
+    """
+    profiles = []
+    for r in results:
+        finger = r["finger"]
+        std    = STANDARD_NAILS.get(finger)
+        if std is None:
+            continue
+        w      = r["width_mm"]
+        l      = r.get("corrected_length_mm") or r["length_mm"]
+        w_cat  = _size_category(w - std["width_mm"])
+        l_cat  = _size_category(l - std["length_mm"])
+        profiles.append({
+            "finger":    finger,
+            "nail_size": _overall_size(w_cat, l_cat),
+            "skin_tone": r.get("skin_tone_hex", "#FFFFFF"),
+        })
+    return profiles
+
+
+# ─────────────────────────────────────────────────────────────
+# 11. CLI
 # ─────────────────────────────────────────────────────────────
 
 def main():
@@ -619,6 +676,13 @@ def main():
     json_path = os.path.join(args.output, "nail_measurements.json")
     with open(json_path, "w") as f:
         json.dump(payload, f, indent=2)
+
+    profiles      = build_profile(results)
+    profile_path  = os.path.join(args.output, "profile.json")
+    # Single finger → save the dict directly; batch → save as a list.
+    profile_data  = profiles[0] if len(profiles) == 1 else profiles
+    with open(profile_path, "w") as f:
+        json.dump(profile_data, f, indent=2)
 
     print(f"\n{'='*55}")
     print(f"✅ Saved → {json_path}")

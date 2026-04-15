@@ -31,6 +31,8 @@ Winding (all analytically verified):
                      [T[i,N], B[i,N],   B[i+1,N]]      +X
     Arch-bottom cap: [t[0,j], b[0,j], t[0,j+1]]        -Y
                      [b[0,j], b[0,j+1], t[0,j+1]]      -Y
+    Tip cap        : [t[M,j], t[M,j+1], b[M,j]]        +Y  (flat-tip shapes only)
+                     [t[M,j+1], b[M,j+1], b[M,j]]      +Y
   Every shared edge is traversed in opposite directions → manifold.
 """
 import argparse, json, os, struct, sys
@@ -64,27 +66,85 @@ def write_binary_stl(filepath, triangles):
 
 
 # ─────────────────────────────────────────────────────────────
+# Tip shape catalogue
+# ─────────────────────────────────────────────────────────────
+
+SHAPES = ("oval", "almond", "square", "squoval", "stiletto", "coffin")
+
+# Height of the tip taper region as a fraction of nail width W.
+# Shapes whose tips taper to a point (oval, almond, stiletto) are closed
+# by the degenerate-triangle filter.  Flat-ended shapes (square, squoval,
+# coffin) need an explicit tip-cap face and a non-zero tip_h so the cap
+# has a well-defined cross-section.
+TIP_HEIGHT_FACTOR = {
+    "oval":     0.50,   # semi-ellipse, smooth closed arc
+    "almond":   0.70,   # cosine taper to a soft point
+    "square":   0.00,   # no taper — flat perpendicular tip, full width
+    "squoval":  0.20,   # square corners + quarter-circle fillet r = 0.2 W
+    "stiletto": 1.00,   # linear taper to a sharp point
+    "coffin":   0.80,   # linear taper truncated at 80 % → flat narrow tip
+}
+
+# Shapes whose tip is a flat face (need an explicit cap triangle strip).
+FLAT_TIP_SHAPES = {"square", "squoval", "coffin"}
+
+
+# ─────────────────────────────────────────────────────────────
 # Nail shape: analytic cross-section width at each Y
 # ─────────────────────────────────────────────────────────────
 
-def x_extent(y_val, W, L_total, tip_h, cuticle_depth):
+def x_extent(y_val, W, L_total, tip_h, cuticle_depth, shape="oval"):
     """
     Return (x_left, x_right) for the nail footprint at height y_val.
 
     Three regions:
-      y in [-cuticle_depth, 0]   : elliptical cuticle arch
-                                   full width at y=0, closes at y=-cuticle_depth
-      y in [0, L_total - tip_h]  : straight sides, full width W
-      y in [L_total-tip_h, L_total]: semi-elliptical tip arc
-                                   full width at y=L_total-tip_h, closes at tip
+      y in [-cuticle_depth, 0]        : circular-arc cuticle arch
+      y in [0,  L_total - tip_h]      : straight sides, full width W
+      y in [L_total-tip_h, L_total]   : tip region — shape-dependent
     """
     y_side_top = L_total - tip_h
 
     if y_val >= y_side_top:
-        # Tip semi-ellipse
-        t = min((y_val - y_side_top) / tip_h, 1.0)
-        cos_v = float(np.sqrt(max(1.0 - t * t, 0.0)))
-        return W / 2 - W / 2 * cos_v, W / 2 + W / 2 * cos_v
+        # ── Tip region ────────────────────────────────────────
+        if shape == "square":
+            # No taper; flat perpendicular tip at full width.
+            return 0.0, float(W)
+
+        # Normalised position within tip: 0 at base, 1 at tip end.
+        t = min((y_val - y_side_top) / tip_h, 1.0) if tip_h > 0 else 1.0
+
+        if shape == "oval":
+            # Ellipse: x²/a² + y²/b² = 1 → half_w = (W/2)·√(1−t²)
+            half_w = W / 2 * float(np.sqrt(max(1.0 - t * t, 0.0)))
+
+        elif shape == "almond":
+            # Cosine taper — narrower than oval, closes to a soft point.
+            half_w = W / 2 * float(np.cos(t * np.pi / 2))
+
+        elif shape == "squoval":
+            # Quarter-circle fillet of radius r = 0.2·W at each corner.
+            # Arc centre: (r, L_total−r) and (W−r, L_total−r).
+            # At dy above y_side_top:  xl = r − √(r²−dy²)
+            #                          xr = (W−r) + √(r²−dy²)
+            r   = W * 0.2
+            dy  = y_val - y_side_top          # 0 → r
+            arc = float(np.sqrt(max(r * r - dy * dy, 0.0)))
+            return r - arc, (W - r) + arc
+
+        elif shape == "stiletto":
+            # Linear taper to a sharp point: w(t) = W·(1−t)
+            half_w = W / 2 * (1.0 - t)
+
+        elif shape == "coffin":
+            # Linear taper truncated at t = 0.8 → flat tip of 20 % width.
+            # w(t) = W·(1 − min(t, 0.8))
+            half_w = W / 2 * (1.0 - min(t, 0.8))
+
+        else:
+            # Fallback: oval
+            half_w = W / 2 * float(np.sqrt(max(1.0 - t * t, 0.0)))
+
+        return W / 2 - half_w, W / 2 + half_w
 
     elif y_val >= 0.0:
         # Straight sides
@@ -139,8 +199,9 @@ def generate_stl(params, output_path):
     CUT_DEPTH = float(params.get("cuticle_depth_mm", 1.5))
     x_cen     = W / 2.0
 
+    shape   = params.get("shape", "oval")
     L_total = L + L_ext
-    tip_h   = W * 0.45            # tip arc height (same formula as before)
+    tip_h   = W * TIP_HEIGHT_FACTOR.get(shape, 0.50)
 
     # ── Build structured grid ─────────────────────────────────
     nx = 50   # columns across width
@@ -152,7 +213,7 @@ def generate_stl(params, output_path):
     grid_x = np.zeros((ny, nx))
     grid_y = np.zeros((ny, nx))
     for i, y in enumerate(ys):
-        xl, xr = x_extent(y, W, L_total, tip_h, CUT_DEPTH)
+        xl, xr = x_extent(y, W, L_total, tip_h, CUT_DEPTH, shape)
         grid_x[i] = xl + np.linspace(0, 1, nx) * (xr - xl)
         grid_y[i] = y
 
@@ -213,6 +274,22 @@ def generate_stl(params, output_path):
         all_tris.append([T0, B1, T1])
         all_tris.append([T0, B0, B1])
 
+    # ── Tip cap  (flat-tip shapes: square / squoval / coffin) ────
+    # Pointed shapes (oval, almond, stiletto) converge to zero width and are
+    # closed implicitly by the degenerate-triangle filter below.
+    # Flat-tip shapes have a finite cross-section at i=ny-1 that must be
+    # closed with an explicit cap face (normal +Y).
+    # Winding for +Y: viewed from +Y the vertices are CCW →
+    #   Tri1 [t[M,j], t[M,j+1], b[M,j]]
+    #   Tri2 [t[M,j+1], b[M,j+1], b[M,j]]
+    if shape in FLAT_TIP_SHAPES:
+        M = ny - 1
+        for j in range(nx - 1):
+            t0 = top3d[M, j];   t1 = top3d[M, j+1]
+            b0 = bot3d[M, j];   b1 = bot3d[M, j+1]
+            all_tris.append([t0, t1, b0])
+            all_tris.append([t1, b1, b0])
+
     # Drop degenerate triangles (two or more identical vertices).
     # These appear at the tip and cuticle arch bottom where the grid
     # rows collapse to a single point.  The adjacent valid fan triangles
@@ -236,6 +313,7 @@ def generate_stl(params, output_path):
         "triangles": n_tris,
         "file_kb":   kb,
         "dimensions": {
+            "shape":           shape,
             "width_mm":        round(W, 2),
             "length_mm":       round(L_total, 2),
             "c_curve_mm":      round(C, 2),
@@ -265,6 +343,9 @@ def main():
                         "(default 1.5 — increase for deeper arch)")
     p.add_argument("--thickness",      type=float, default=2.0,
                    help="Uniform shell thickness in mm (default 2.0)")
+    p.add_argument("--shape",          default="oval", choices=SHAPES,
+                   help="Tip shape: oval | almond | square | squoval | "
+                        "stiletto | coffin  (default: oval)")
     args = p.parse_args()
 
     with open(args.input) as f:
@@ -278,7 +359,7 @@ def main():
         sys.exit("ERROR: No matching nails in JSON")
 
     print(f"\n{'='*55}")
-    print(f"  Exact-Fit Nail STL  v15")
+    print(f"  Exact-Fit Nail STL  v15  |  shape: {args.shape}")
     print(f"  Tip +{args.tip_extension}mm  CuticleArch {args.cuticle_depth}mm  "
           f"Thick {args.thickness}mm")
     print(f"{'='*55}")
@@ -298,14 +379,14 @@ def main():
             "tip_extension_mm":    args.tip_extension,
             "cuticle_depth_mm":    args.cuticle_depth,
             "thickness_mm":        args.thickness,
+            "shape":               args.shape,
         }
 
-        out   = os.path.join(args.output, f"nail_{finger}_exact.stl")
+        out   = os.path.join(args.output, f"nail_{finger}_{args.shape}.stl")
         stats = generate_stl(params, out)
         d     = stats["dimensions"]
-        print(f"  W={d['width_mm']}mm  L={d['length_mm']}mm  "
+        print(f"  shape={d['shape']}  W={d['width_mm']}mm  L={d['length_mm']}mm  "
               f"C={d['c_curve_mm']}mm  thick={d['thickness_mm']}mm  "
-              f"cuticle={d['cuticle_depth_mm']}mm  "
               f"{stats['triangles']} tris  {stats['file_kb']}KB")
 
     print(f"\n{'='*55}\n")
