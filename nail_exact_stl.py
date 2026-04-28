@@ -81,8 +81,8 @@ TIP_HEIGHT_FACTOR = {
     "almond":   0.70,   # cosine taper to a soft point
     "square":   0.00,   # no taper — flat perpendicular tip, full width
     "squoval":  0.20,   # square corners + quarter-circle fillet r = 0.2 W
-    "stiletto": 1.00,   # linear taper to a sharp point
-    "coffin":   0.80,   # linear taper truncated at 80 % → flat narrow tip
+    "stiletto": 1.50,   # linear taper to a sharp point (longer, more dramatic)
+    "coffin":   1.00,   # linear taper to flat tip ~40 % of nail width
 }
 
 # Shapes whose tip is a flat face (need an explicit cap triangle strip).
@@ -132,13 +132,14 @@ def x_extent(y_val, W, L_total, tip_h, cuticle_depth, shape="oval"):
             return r - arc, (W - r) + arc
 
         elif shape == "stiletto":
-            # Linear taper to a sharp point: w(t) = W·(1−t)
+            # Linear taper to a sharp point over a long region (1.5·W).
+            # w(t) = W·(1−t)  →  0 at t=1
             half_w = W / 2 * (1.0 - t)
 
         elif shape == "coffin":
-            # Linear taper truncated at t = 0.8 → flat tip of 20 % width.
-            # w(t) = W·(1 − min(t, 0.8))
-            half_w = W / 2 * (1.0 - min(t, 0.8))
+            # Linear taper from full width to ~40 % of W at the flat top.
+            # w(t) = W·(1 − 0.6·t)  →  0.4·W at t=1
+            half_w = W / 2 * (1.0 - 0.6 * t)
 
         else:
             # Fallback: oval
@@ -195,13 +196,24 @@ def generate_stl(params, output_path):
     # Prefer corrected_length_mm when the measurer flagged the raw length as
     # suspect (nail tip not fully visible in photo).
     L         = float(params.get("corrected_length_mm") or params["length_mm"])
-    L_ext     = float(params.get("tip_extension_mm", 1.0))
+    # Shape-specific default extensions: stiletto/coffin get 7 mm,
+    # all other shapes default to 3 mm.  An explicit --tip-extension
+    # value always wins (passed as a non-None entry in params).
+    _shape_tmp = params.get("shape", "oval")
+    _ext_default = 7.0 if _shape_tmp in ("stiletto", "coffin") else 3.0
+    L_ext     = float(params.get("tip_extension_mm") or _ext_default)
     CUT_DEPTH = float(params.get("cuticle_depth_mm", 1.5))
     x_cen     = W / 2.0
 
     shape   = params.get("shape", "oval")
     L_total = L + L_ext
-    tip_h   = W * TIP_HEIGHT_FACTOR.get(shape, 0.50)
+    # For stiletto and coffin the taper covers only the extension beyond the
+    # natural nail — full width is maintained up to the free edge, then the
+    # sides taper inward over exactly L_ext mm.
+    if shape in ("stiletto", "coffin"):
+        tip_h = L_ext
+    else:
+        tip_h = W * TIP_HEIGHT_FACTOR.get(shape, 0.50)
 
     # ── Build structured grid ─────────────────────────────────
     nx = 50   # columns across width
@@ -336,8 +348,9 @@ def main():
                    help="Only generate this finger (e.g. index)")
     p.add_argument("--output",         default="nail_stl",
                    help="Output directory (default: nail_stl)")
-    p.add_argument("--tip-extension",  type=float, default=1.0,
-                   help="Extra mm added beyond nail tip (default 1.0)")
+    p.add_argument("--tip-extension",  type=float, default=None,
+                   help="Extra mm beyond nail tip (default: 7mm for stiletto/"
+                        "coffin, 3mm for all other shapes)")
     p.add_argument("--cuticle-depth",  type=float, default=1.5,
                    help="Depth of cuticle arch below cuticle line in mm "
                         "(default 1.5 — increase for deeper arch)")
@@ -358,9 +371,12 @@ def main():
     if not nails:
         sys.exit("ERROR: No matching nails in JSON")
 
+    ext_default = 7.0 if args.shape in ("stiletto", "coffin") else 3.0
+    display_ext = args.tip_extension if args.tip_extension is not None else ext_default
+
     print(f"\n{'='*55}")
     print(f"  Exact-Fit Nail STL  v15  |  shape: {args.shape}")
-    print(f"  Tip +{args.tip_extension}mm  CuticleArch {args.cuticle_depth}mm  "
+    print(f"  Tip +{display_ext}mm  CuticleArch {args.cuticle_depth}mm  "
           f"Thick {args.thickness}mm")
     print(f"{'='*55}")
 

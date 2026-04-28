@@ -36,7 +36,7 @@ import cv2
 import numpy as np
 from scipy.interpolate import splprep, splev
 from scipy.ndimage import uniform_filter1d
-from scipy.signal import find_peaks
+from scipy.signal import find_peaks, peak_prominences
 
 
 # ─────────────────────────────────────────────────────────────
@@ -320,7 +320,12 @@ def measure_top(image: np.ndarray, mpp: float,
     min_d    = max(int(4 / mpp), plate_start + 2)
     prom_min = max(rstr[min_d:].max() * 0.10, 0.5) if len(rstr) > min_d else 0.5
     pks, _   = find_peaks(rstr[min_d:], distance=6, prominence=prom_min)
-    cuticle_y = tip_y + min_d + int(pks[0]) if len(pks) > 0 else tip_y + int(11/mpp)
+    if len(pks) > 0:
+        prom_vals = peak_prominences(rstr[min_d:], pks)[0]
+        best_pk   = pks[int(np.argmax(prom_vals))]
+        cuticle_y = tip_y + min_d + int(best_pk)
+    else:
+        cuticle_y = tip_y + int(11/mpp)
 
     cut_idx   = min(cuticle_y - tip_y, len(widths)-1)
     length_px = float(cuticle_y - tip_y)
