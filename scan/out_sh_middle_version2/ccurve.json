@@ -1,0 +1,23 @@
+{
+  "c_curve_mm": 2.38,
+  "arc_radius_mm": 6.06,
+  "arc_radius_fit_mm": 6.06,
+  "arc_length_mm": 11.13,
+  "arc_width_px": 137.0,
+  "sagitta_px": 33.8,
+  "scale_mm_per_px": 0.07028,
+  "nail_endpoints": {
+    "left": [
+      941,
+      575
+    ],
+    "right": [
+      1078,
+      577
+    ],
+    "peak": [
+      990,
+      537
+    ]
+  }
+}
