@@ -609,8 +609,17 @@ def detect_cuticle_by_color(image: np.ndarray, cx: int, fy: int,
     sm = lambda v: np.convolve(v, np.ones(n) / n, mode="same")
     a, b = sm(A[:, x0:x1].mean(1)), sm(B[:, x0:x1].mean(1))
 
+    # Upper bound 1.7, not 2.2: the transverse skin creases below the cuticle
+    # produce the same a*-minimum + b*-rise signature the cuticle does, and with
+    # the window open to 2.2 a crease can outscore the real cuticle outright
+    # (measured on a live frame: crease at 1.81 scored 5.18 while the true
+    # cuticle scored 0.33, giving L=18.6mm instead of ~12.8mm).  Plate length in
+    # units of the measured width is 1.072-1.453 across all seven reference
+    # photos, so 1.7 keeps every validated case with ~17% margin while putting
+    # the 1.81 crease out of reach.  The 0.7 floor is left alone - nothing has
+    # ever failed against it.
     lo = fy + int(width_px * 0.7)
-    hi = min(H - 3, fy + int(width_px * 2.2))
+    hi = min(H - 3, fy + int(width_px * 1.7))
     if hi - lo < 5:
         return None
     mins = [y for y in range(lo + 2, hi - 2)
@@ -1064,6 +1073,14 @@ def measure_top(image: np.ndarray, mpp: float,
     lateral = detect_lateral_edges(
         image, finger_mask, _axis, fy, cuticle_y, nail_half, mpp)
 
+    # Count the GENUINE fold detections before the hold-extension below fills
+    # the gaps, because that count is the honest measure of how much evidence
+    # the width rests on.  Side-lit photos give 52-73% of rows; the flat-lit
+    # light box gives 5-13%, and a width fitted on a handful of rows is the
+    # likeliest reason the reading jumps between two values.
+    _lateral_rows = len(lateral)
+    _lateral_span = max(cuticle_y - fy, 1)
+
     # The fold is only detectable over part of the nail (typically not right up
     # at the tip, where it runs under the free edge).  Rows outside that span
     # would otherwise fall back to the constant-width branch below, which is
@@ -1243,6 +1260,8 @@ def measure_top(image: np.ndarray, mpp: float,
         "_tip_y":          tip_y,
         "_cuticle_y":      cuticle_y,
         "_plate_start":    plate_start,
+        "_lateral_rows":   _lateral_rows,
+        "_lateral_span":   _lateral_span,
     }
 
 
@@ -1276,7 +1295,12 @@ def apply_wl_correction(finger: str, width_mm: float, length_mm: float) -> dict:
 # 7. Visualisation
 # ─────────────────────────────────────────────────────────────
 
-def save_annotated(image, data, aruco_corners, finger, save_path):
+def draw_annotated(image, data, aruco_corners, finger):
+    """Draw the measurement overlay and return it (full resolution).
+
+    Split out of save_annotated so the live camera preview
+    (nail_live.py) can render the same overlay without touching disk.
+    """
     vis   = image.copy()
     color = NAIL_COLORS.get(finger, (200,200,200))
 
@@ -1324,6 +1348,11 @@ def save_annotated(image, data, aruco_corners, finger, save_path):
         cv2.putText(vis, txt, (lx, tip_y+dy),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, col, 2)
 
+    return vis
+
+
+def save_annotated(image, data, aruco_corners, finger, save_path):
+    vis   = draw_annotated(image, data, aruco_corners, finger)
     scale = 900 / vis.shape[0]
     cv2.imwrite(save_path, cv2.resize(vis, (int(vis.shape[1]*scale), 900)))
     print(f"  [Saved] {save_path}")

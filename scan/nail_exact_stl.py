@@ -91,6 +91,12 @@ FLAT_TIP_SHAPES = {"square", "ballerina"}
 # Shapes worn long — default tip extension 7 mm instead of 3 mm.
 LONG_SHAPES = {"almond", "stiletto", "ballerina"}
 
+# 폭 보정(fit margin): 측정한 평평한 폭을 C-curve로 구부리면 실제 손가락을
+# 감싸는 현(chord) 폭이 측정값보다 작아져서, 프린트한 손톱이 실제보다 작게
+# 나옴.  이를 보정하기 위해 STL 생성 전에 측정 폭에 이 값을 더한다.
+# (--exact 모드는 검증용 실측 복제이므로 적용하지 않음.)
+WIDTH_FIT_MARGIN_MM = 1.5
+
 
 # ─────────────────────────────────────────────────────────────
 # Nail shape: analytic cross-section width at each Y
@@ -202,8 +208,12 @@ def generate_stl(params, output_path):
     # Extra dome height (mm) at the cuticle end, blending to 0 at the free
     # edge — makes the inner cavity rounder where the finger flesh is rounder.
     # Forced to 0 in exact mode (validation replica must stay true).
+    # Reverted to the previous uniform C-curve dome: the cuticle-side extra
+    # roundness (cuticle_curve) is now OFF by default (0.0).  It made prints
+    # come out wrong, so the inner dome again uses the measured C-curve at
+    # every row.  Pass --cuticle-curve >0 to re-enable the blend if wanted.
     CUT_CURVE = 0.0 if params.get("exact") else \
-        float(params.get("cuticle_curve_mm", 1.0))
+        float(params.get("cuticle_curve_mm", 0.0))
     _shape_tmp = params.get("shape", "round")
     if EXACT:
         # Exact-replica mode (validation prints): true measured dimensions,
@@ -213,9 +223,9 @@ def generate_stl(params, output_path):
         L     = max(float(params["length_mm"]) - CUT_DEPTH, 1.0)
         L_ext = 0.0
     else:
-        # 폭 보정: 기존 -1 mm는 실제 손톱보다 1 mm 작게 프린트됨 → +1 mm 해서
-        # 측정한 실제 폭 그대로 프린트되도록 함 (착용감 보정 오프셋 제거).
-        W     = float(params["width_mm"]) + 0.0
+        # 폭 보정: C-curve로 구부리면 현(chord) 폭이 줄어 실제보다 작게
+        # 프린트되므로, 측정 폭에 fit margin(+WIDTH_FIT_MARGIN_MM)을 더한다.
+        W     = float(params["width_mm"]) + WIDTH_FIT_MARGIN_MM
         # Length: use the MEASURED length (Sobel tip→cuticle).  The old code
         # preferred corrected_length_mm = width / 0.91 (Jung et al. W/L prior),
         # but ruler ground truth showed 0.91 is wrong (true ~0.64–0.86), which
@@ -484,11 +494,12 @@ def main():
     p.add_argument("--cuticle-depth",  type=float, default=1.5,
                    help="Depth of cuticle arch below cuticle line in mm "
                         "(default 1.5 — increase for deeper arch)")
-    p.add_argument("--cuticle-curve",  type=float, default=1.0,
+    p.add_argument("--cuticle-curve",  type=float, default=0.0,
                    help="Extra inner-dome height in mm at the cuticle end, "
                         "blending to the measured C-curve at the free edge "
-                        "(default 1.0 — the fingertip is rounder near the "
-                        "cuticle; 0 disables). Ignored in --exact mode")
+                        "(default 0 — OFF, uses the plain measured C-curve; "
+                        "set >0 to re-enable the cuticle-side rounding). "
+                        "Ignored in --exact mode")
     p.add_argument("--thickness",      type=float, default=0.6,
                    help="Uniform shell thickness in mm (default 0.6)")
     p.add_argument("--exact",          action="store_true",

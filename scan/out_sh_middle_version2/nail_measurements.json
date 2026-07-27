@@ -8,7 +8,7 @@
       "width_mm": "75th pct of stable row-scan nail plate width",
       "length_mm": "Tip to cuticle via Sobel edge detection",
       "corrected_length_mm": "width / Jung et al. (2015) W/L ratio",
-      "c_curve_mm": "Measured from end-on tip photo: free-edge band circle fit",
+      "c_curve_mm": "Estimated from nail fold brightness drop at 30/50/70% of nail",
       "arc_radius_mm": "R = w\u00b2/(8h) + h/2",
       "skin_tone_hex": "Median BGR of skin ring around nail"
     }
@@ -1635,8 +1635,7 @@
         "within_1_sigma": false,
         "flag": "length_suspect"
       },
-      "aspect_ratio": 0.671,
-      "c_curve_source": "end-on photo (sh_middle_ccurve.jpg)"
+      "aspect_ratio": 0.671
     }
   ],
   "by_finger": {
@@ -3261,8 +3260,7 @@
         "within_1_sigma": false,
         "flag": "length_suspect"
       },
-      "aspect_ratio": 0.671,
-      "c_curve_source": "end-on photo (sh_middle_ccurve.jpg)"
+      "aspect_ratio": 0.671
     }
   },
   "mesh_params": {
