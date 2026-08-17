@@ -1,5 +1,27 @@
-{
-  "finger": "index",
-  "nail_size": "average",
-  "skin_tone": "#CBAF99"
-}
+[
+  {
+    "finger": "thumb",
+    "nail_size": "average",
+    "skin_tone": "#D6AE95"
+  },
+  {
+    "finger": "index",
+    "nail_size": "much_larger",
+    "skin_tone": "#DBAF95"
+  },
+  {
+    "finger": "middle",
+    "nail_size": "average",
+    "skin_tone": "#D5AC95"
+  },
+  {
+    "finger": "ring",
+    "nail_size": "much_larger",
+    "skin_tone": "#D6AA95"
+  },
+  {
+    "finger": "pinky",
+    "nail_size": "much_larger",
+    "skin_tone": "#E1B398"
+  }
+]

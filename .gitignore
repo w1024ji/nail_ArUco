@@ -1,7 +1,16 @@
 __pycache__
-
+scan/__pycache__
 
 .claude
 claude
 
 .env
+
+scan/out_5f_20mm/
+printer/*
+scan/2026-08-15_test/*
+scan/_lunula_*
+scan/out_live/*
+scan/daily_summary_2026-08-15.txt
+scan/nail_stl_square_test/
+

@@ -80,7 +80,7 @@ TIP_HEIGHT_FACTOR = {
     "round":     0.50,  # semi-ellipse (tip_h = 0.5·W) → perfect semi-circle, short and wide
     "oval":      0.65,  # semi-ellipse (tip_h = 0.65·W) → taller ellipse, more elongated than round
     "almond":    0.85,  # elongated ellipse — tapered sides, fully rounded tip
-    "square":    0.00,  # no taper — flat perpendicular tip, full width
+    "square":    0.45,  # flat tip, but with a subtle width taper leading into it (see taper_mm)
     "stiletto":  1.50,  # linear taper to a sharp point (longer, more dramatic)
     "ballerina": 1.00,  # linear taper to flat tip ~40 % of nail width
 }
@@ -102,7 +102,7 @@ WIDTH_FIT_MARGIN_MM = 1.5
 # Nail shape: analytic cross-section width at each Y
 # ─────────────────────────────────────────────────────────────
 
-def x_extent(y_val, W, L_total, tip_h, cuticle_depth, shape="round", tip_r=0.0):
+def x_extent(y_val, W, L_total, tip_h, cuticle_depth, shape="round", tip_r=0.0, taper_mm=0.0):
     """
     Return (x_left, x_right) for the nail footprint at height y_val.
 
@@ -116,13 +116,20 @@ def x_extent(y_val, W, L_total, tip_h, cuticle_depth, shape="round", tip_r=0.0):
     if y_val >= y_side_top:
         # ── Tip region ────────────────────────────────────────
         if shape == "square":
-            # Flat tip at full width, but with a circular-arc corner in XY
-            # for the last tip_r mm so the plan-view corners are rounded.
+            # Real square nails aren't perfectly parallel-sided: the plate
+            # narrows a little (a few tenths of a mm per side) from the body
+            # toward the free edge before the flat tip, THEN the last tip_r
+            # mm of that already-slightly-narrower edge gets the circular-arc
+            # corner rounding. t=0 at the start of this region (full W),
+            # t=1 at the tip (W - taper_mm).
+            t = min((y_val - y_side_top) / tip_h, 1.0) if tip_h > 0 else 1.0
+            half_reduction = (taper_mm / 2.0) * t
+            xl0, xr0 = half_reduction, float(W) - half_reduction
             if tip_r > 0 and y_val >= (L_total - tip_r):
                 d_y   = y_val - (L_total - tip_r)          # 0→tip_r
                 inset = tip_r - float(np.sqrt(max(tip_r ** 2 - d_y ** 2, 0.0)))
-                return inset, float(W) - inset
-            return 0.0, float(W)
+                return xl0 + inset, xr0 - inset
+            return xl0, xr0
 
         # Normalised position within tip: 0 at base, 1 at tip end.
         t = min((y_val - y_side_top) / tip_h, 1.0) if tip_h > 0 else 1.0
@@ -244,9 +251,13 @@ def generate_stl(params, output_path):
     EDGE_R  = float(params.get("edge_round_mm", 0.0))
     L_total = L + L_ext
 
-    # Square uses no XY plan-view corner rounding — corners are 90° in footprint.
-    # The "bent paper" look comes from the C-curve carried to the tip face.
-    CORNER_R = 0.0
+    # Square's plan-view (XY) tip corners: rounded off by CORNER_R mm so the
+    # free-edge corners don't scratch skin (a quarter-circle inset, see the
+    # "square" branch of x_extent()). 0 = sharp 90° corners.
+    CORNER_R = float(params.get("corner_round_mm", 0.0) or 0.0)
+    # Square's subtle width taper leading into the tip (see x_extent()) —
+    # total mm the plate narrows by, split evenly across both sides.
+    TAPER_MM = float(params.get("taper_mm", 0.0) or 0.0)
 
     # Stiletto: taper covers the extension plus the top 30 % of the natural nail,
     # so the sides start narrowing before the free edge — matches the smooth
@@ -259,6 +270,13 @@ def generate_stl(params, output_path):
     elif shape == "ballerina":
         # Straight sides from cuticle to midpoint, taper from midpoint to tip.
         tip_h = L_total * 0.5
+    elif shape == "square":
+        # The taper+corner-round region must stay entirely within the
+        # extension (L_ext) — the real measured nail (length L) has to be
+        # fully covered at full width first, and only narrow after that.
+        # Capped at L_ext so y_side_top = L_total-tip_h never dips below L.
+        tip_h = min(L_ext, max(CORNER_R, W * TIP_HEIGHT_FACTOR.get(shape, 0.45)))
+        CORNER_R = min(CORNER_R, tip_h)
     else:
         tip_h = W * TIP_HEIGHT_FACTOR.get(shape, 0.50)
 
@@ -273,7 +291,7 @@ def generate_stl(params, output_path):
     grid_y = np.zeros((ny, nx))
     for i, y in enumerate(ys):
         xl, xr = x_extent(y, W, L_total, tip_h, CUT_DEPTH, shape,
-                          tip_r=CORNER_R)
+                          tip_r=CORNER_R, taper_mm=TAPER_MM)
         grid_x[i] = xl + np.linspace(0, 1, nx) * (xr - xl)
         grid_y[i] = y
 
@@ -513,6 +531,17 @@ def main():
                         "rounds the sharp junction between top surface and "
                         "side walls (default: 1.0 for almond/ballerina/"
                         "square/stiletto, 0 for round/oval)")
+    p.add_argument("--corner-round",   type=float, default=None,
+                   help="Plan-view (XY) fillet radius (mm) for the square "
+                        "shape's two tip corners — rounds off the sharp 90° "
+                        "corners so they don't scratch skin (default: 1.5 "
+                        "for square, ignored by other shapes; 0 = sharp)")
+    p.add_argument("--taper",          type=float, default=None,
+                   help="Total mm the square shape's plate narrows by "
+                        "(split evenly across both sides) leading into the "
+                        "tip corners — real square nails aren't perfectly "
+                        "parallel-sided (default: 1.0 for square, ignored "
+                        "by other shapes; 0 = parallel sides)")
     args = p.parse_args()
 
     with open(args.input) as f:
@@ -533,12 +562,18 @@ def main():
     _edge_round_default = 1.0 if args.shape in {"almond", "ballerina", "square", "stiletto"} else 0.0
     edge_round = args.edge_round if args.edge_round is not None else _edge_round_default
 
+    _corner_round_default = 1.5 if args.shape == "square" else 0.0
+    corner_round = args.corner_round if args.corner_round is not None else _corner_round_default
+
+    _taper_default = 1.0 if args.shape == "square" else 0.0
+    taper = args.taper if args.taper is not None else _taper_default
+
     print(f"\n{'='*55}")
     print(f"  Exact-Fit Nail STL  v15  |  shape: {args.shape}")
     _cc = 0.0 if args.exact else args.cuticle_curve
     print(f"  Tip +{display_ext}mm  CuticleArch {args.cuticle_depth}mm  "
           f"Thick {args.thickness}mm  EdgeRound {edge_round}mm  "
-          f"CuticleCurve +{_cc}mm")
+          f"CornerRound {corner_round}mm  Taper {taper}mm  CuticleCurve +{_cc}mm")
     print(f"{'='*55}")
 
     for nail in nails:
@@ -559,6 +594,8 @@ def main():
             "thickness_mm":        args.thickness,
             "shape":               args.shape,
             "edge_round_mm":       edge_round,
+            "corner_round_mm":     corner_round,
+            "taper_mm":            taper,
             "exact":               args.exact,
         }
 

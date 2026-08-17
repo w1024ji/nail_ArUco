@@ -48,6 +48,17 @@ import json
 import os
 import sys
 
+# Console prints in this file use non-ASCII characters (arrows, em-dashes).
+# On Windows the console's native codepage (cp949/cp1252/...) can't encode
+# them, and print() then raises UnicodeEncodeError and kills the run — not on
+# every line, only the ones a given photo happens to trigger (e.g. the
+# envelope-rejection message), which is why this surfaced late and
+# intermittently rather than on every run. Force UTF-8 on stdout/stderr so it
+# never crashes regardless of the console's codepage.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 import cv2
 import numpy as np
 from scipy.interpolate import splprep, splev
@@ -86,31 +97,34 @@ NAIL_COLORS = {
     "pinky":  ( 80, 200, 200),
 }
 
-# Reference dimensions for per-finger size classification (Asian women,
-# Jung et al. 2015 + derived values — same source as nail_tip_generator.py).
+# Reference dimensions for per-finger size classification: mean +- SD,
+# Korean adult women, n=600 (200 each in their 20s/30s/40s), right hand,
+# digital vernier caliper. Verified 2026-08-13 against the primary source:
+# Yeo, Kim, Park & Kim (2017), "우리나라 성인 여성의 손톱 형태 측정",
+# J. Kor. Soc. Cosmetology 23(2), 269-275, Table 4 ("Total" column,
+# "middle width" row — the fold-to-fold width at the widest point of the
+# plate, matching our width_mm definition; the paper's separate, narrower
+# "bottom width" near the cuticle is NOT used here).
 STANDARD_NAILS = {
-    "thumb":  {"width_mm": 12.1, "length_mm": 11.3},
-    "index":  {"width_mm":  9.1, "length_mm":  9.8},
-    "middle": {"width_mm":  9.6, "length_mm": 10.5},
-    "ring":   {"width_mm":  8.3, "length_mm":  9.8},
-    "pinky":  {"width_mm":  7.0, "length_mm":  8.2},
+    "thumb":  {"width_mm": 12.60, "width_sd": 0.89, "length_mm": 12.83, "length_sd": 0.80},
+    "index":  {"width_mm":  9.83, "width_sd": 0.87, "length_mm": 11.46, "length_sd": 0.87},
+    "middle": {"width_mm": 10.38, "width_sd": 0.79, "length_mm": 11.81, "length_sd": 1.04},
+    "ring":   {"width_mm":  9.70, "width_sd": 0.88, "length_mm": 11.49, "length_sd": 1.09},
+    "pinky":  {"width_mm":  7.85, "width_sd": 0.80, "length_mm":  9.82, "length_sd": 1.06},
 }
 
+# Classification runs on a z-score = (measured - mean) / SD, so the
+# thresholds below are in standard-deviation units, not mm.
 _SIZE_THRESHOLDS = [
     (-2.0, "much_smaller"), (-1.0, "smaller"),
     ( 1.0, "average"),      ( 2.0, "larger"), (float("inf"), "much_larger"),
 ]
 
-def _size_category(diff_mm: float) -> str:
+def _size_category(z: float) -> str:
     for threshold, label in _SIZE_THRESHOLDS:
-        if diff_mm < threshold:
+        if z < threshold:
             return label
     return "much_larger"
-
-def _overall_size(w_cat: str, l_cat: str) -> str:
-    rank = {"much_smaller": 0, "smaller": 1, "average": 2,
-            "larger": 3, "much_larger": 4}
-    return list(rank.keys())[round((rank[w_cat] + rank[l_cat]) / 2.0)]
 
 ARUCO_DICTS = {
     "4x4_50":  cv2.aruco.DICT_4X4_50,
@@ -640,6 +654,80 @@ def detect_cuticle_by_color(image: np.ndarray, cx: int, fy: int,
     return best
 
 
+def detect_cuticle_by_lunula_min(image: np.ndarray, tip_x: int, tip_y: int,
+                                 mpp: float, lo_mm: float = 5.0,
+                                 hi_mm: float = 24.0, min_prominence: float = 9.0):
+    """
+    Cuticle row from the LUNULA — an INDEPENDENT second opinion, not a
+    replacement for detect_cuticle_by_color.
+
+    Many nails show a pale lunula near the cuticle (a* dips there — see
+    detect_cuticle_by_color's docstring), and the BOTTOM of that dip tracks
+    the true cuticle reasonably well on its own: validated on 10 fingers
+    across two sessions (2026-08-15), mean 2.1mm / max 4.2mm off the
+    ruler-measured position — worse than colour where colour already works
+    (colour is validated to ±0.81mm), which is why this stays a second
+    opinion, surfaced to the operator on disagreement, never substituted in
+    automatically (neither signal's own confidence predicts which to trust
+    on a given photo — tried and failed, see nail_measurer.py history).
+
+    First version of this function looked for a PEAK just past the dip
+    instead of the dip itself, reasoning that the cuticle margin reads
+    warmer than the lunula. Wrong on two counts, both caught by eye against
+    the live overlay before shipping: it used "first row that has dropped a
+    little from the running max" as the dip, which on a WIDE lunula (e.g. a
+    thumb whose lunula spans 8-14mm) fires at the lunula's near edge, not its
+    floor — and it then searched only a few mm past that for a "peak",
+    landing on minor texture inside the still-pale lunula rather than ever
+    reaching the true margin. Fixed by finding the actual local minimum
+    (scipy.signal.find_peaks on the negated, smoothed a* curve, keeping the
+    most PROMINENT one so a shallow wobble can't out-rank the real dip) and
+    using ITS row directly — simpler, and on the same 10-finger set, more
+    accurate (mean 2.1mm vs 3.7mm for the peak-chasing version).
+
+    Prominence rather than raw depth for picking among candidate minima:
+    short nails (ring, pinky) often have a SECOND, physically deeper dip well
+    past the true cuticle (the first knuckle crease); a plain argmin latches
+    onto that instead (measured 10+mm off), but it is usually less prominent
+    than the real lunula dip relative to its own neighbourhood.
+
+    min_prominence doubles as a PRESENCE gate, not just a tiebreaker (raised
+    2.0->9.0, 2026-08-16): people with a small or absent lunula (checked:
+    Seunghee, right hand) have no real dip to find, but the old low bar let
+    some other feature (skin texture, a crease) qualify anyway, so this
+    still returned a confident-looking but wrong answer instead of None.
+    Measured on 16 fingers across two people/four sessions: wj's real
+    lunula-dip prominence (on the fingers this override is actually trusted
+    for, index/middle — ring/pinky are governed by the envelope check
+    either way) ranges 9.5-13.3; Seunghee's best coincidental dip tops out
+    at 8.8. 9.0 sits in that gap — verified against the same 11-photo
+    reference set with no change in any final answer, and against
+    Seunghee's photos, where two previously-wrong overrides (index pulled
+    2mm too long, middle pulled 6mm too short) now correctly return None
+    and fall back to the primary detector instead.
+
+    Returns the estimated cuticle row, or None if no qualifying dip is found.
+    """
+    H, W = image.shape[:2]
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
+    hw = max(3, int(2.5 / mpp))
+    x0, x1 = max(0, tip_x - hw), min(W, tip_x + hw)
+    if x1 - x0 < 3:
+        return None
+    n = max(3, int(0.6 / mpp) | 1)
+    a = np.convolve(lab[:, x0:x1, 1].mean(1), np.ones(n) / n, mode="same")
+
+    lo = tip_y + int(lo_mm / mpp)
+    hi = min(H - 3, tip_y + int(hi_mm / mpp))
+    if hi <= lo:
+        return None
+
+    mins, props = find_peaks(-a[lo:hi], prominence=min_prominence)
+    if len(mins) == 0:
+        return None
+    return lo + int(mins[np.argmax(props["prominences"])])
+
+
 def detect_lateral_edges(image: np.ndarray, finger_mask: np.ndarray,
                          axis_hint: int, fy: int, cuticle_y: int,
                          nail_half: float, mpp: float) -> dict:
@@ -844,13 +932,30 @@ def detect_lateral_edges(image: np.ndarray, finger_mask: np.ndarray,
 def measure_top(image: np.ndarray, mpp: float,
                 finger_mask: np.ndarray, bbox: tuple,
                 nail_plate_mask: np.ndarray = None,
-                aruco_corners: np.ndarray = None) -> dict:
+                aruco_corners: np.ndarray = None,
+                finger: str = None,
+                guide_y: int = None, guide_tol_mm: float = 5.0) -> dict:
     """
     nail_plate_mask : optional uint8 binary mask (255=nail plate).
         When provided, width is measured from the nail plate boundary instead
         of the full finger skin boundary, and the polygon margin is set to 0
         so the outline follows the detected nail plate edges exactly.
         finger_mask is still used for skin-tone sampling.
+    finger : optional finger name, used only to decide whether the lunula-min
+        second opinion (detect_cuticle_by_lunula_min) should be trusted as
+        the primary cuticle answer — see ACCEPT_ALT_CUTICLE_FOR below.
+    guide_y : optional row (pixels), the on-screen guide line the operator
+        was asked to align their cuticle to (see nail_live.py). When given,
+        every cuticle candidate (gradient, colour, lunula-min) further than
+        guide_tol_mm from this row is discarded before the usual accept/
+        reject logic runs, and it becomes the fallback if nothing survives.
+        This is a much stronger disambiguator than any of the ratio-based
+        checks below, because it comes from where the operator actually
+        placed their finger for THIS photo rather than a population prior —
+        added 2026-08-16 after the ratio-envelope approach was shown to need
+        conflicting thresholds for different fingers on the same hand (see
+        session history). None (the default) reproduces the old behaviour
+        exactly, so photos without a guide line are unaffected.
     """
     H, W  = image.shape[:2]
     gray  = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -962,11 +1067,21 @@ def measure_top(image: np.ndarray, mpp: float,
         w_mm_est = max(rx - lx for lx, rx in _lat_pre.values()) * mpp
         print(f"  [Cuticle] using measured fold width {w_mm_est:.2f}mm")
 
+    guide_tol_px = (guide_tol_mm / mpp) if guide_y is not None else None
+
+    def _in_guide(y):
+        return guide_y is None or abs(y - guide_y) <= guide_tol_px
+
     # Colour-based cuticle first: it is lighting-independent and measured within
     # ±0.81mm on all four reference photos, versus -3.6mm for the W/L fallback
     # when the L-gradient finds nothing.
     _cut_color = detect_cuticle_by_color(
         image, tip_x, fy, w_mm_est / mpp, mpp)
+    if _cut_color is not None and not _in_guide(_cut_color):
+        print(f"  [Cuticle] colour REJECTED (guide line): y={_cut_color} "
+              f"is {abs(_cut_color-guide_y)*mpp:.1f}mm from the guide row "
+              f"> {guide_tol_mm}mm")
+        _cut_color = None
 
     # W/L ratio baseline (Jung et al. 2015, ~0.91).
     # NOTE: W/L applies to the NAIL PLATE only (from fy, the natural fingertip
@@ -985,12 +1100,27 @@ def measure_top(image: np.ndarray, mpp: float,
     # CLOSEST to wl_cuticle.  "Closest" beats "first" (which undershoots onto a
     # plate highlight) and "strongest" (which overshoots onto the bright finger
     # pad below the cuticle) — both seen across fingers.
+    #
+    # A wider window (tried 2026-08-15, to reach a real long middle finger
+    # whose true cuticle sat 5.5mm outside this window) does not fix that case
+    # safely: a valley/crossing search that reaches far enough to find a real
+    # long nail's cuticle ALSO reaches the transverse fingertip-pad crease that
+    # every previously-correct finger has nearby, and cannot tell the two
+    # apart from this signal alone — it silently regressed three previously
+    # correct fingers (index 11.3->14.2mm, thumb 14.6->18.9mm, pinky similarly)
+    # to fix the one long-nail case. Left at ±3.5mm: safe for the validated
+    # cases, known-wrong for unusually long nails until a shape-aware signal
+    # (e.g. nail-ridge texture vs. skin) can tell a cuticle groove from a pad
+    # crease.
     L_img = L_full.astype(np.float32)   # reuse already-computed L channel
     # Tight window centred on the W/L estimate, but never above fy+8 mm (which
     # would risk the free-edge/smile transition).
     search_top = max(fy + int(8 / mpp), wl_cuticle - int(3.5 / mpp))
     search_bot = min(H, wl_cuticle + int(3.5 / mpp))
-    cuticle_y  = wl_cuticle   # default fallback
+    # Default fallback: the guide line (grounded in this specific photo) beats
+    # the population-ratio prior wl_cuticle whenever we have one.
+    cuticle_y  = guide_y if guide_y is not None else wl_cuticle
+    grad_ok    = False        # True only if a real L-transition was snapped to
 
     if search_bot > search_top + 10:
         # Per-row brightness: track the finger center dynamically using the
@@ -1022,18 +1152,21 @@ def measure_top(image: np.ndarray, mpp: float,
             # one CLOSEST to the W/L estimate.  If none qualify, keep wl_cuticle.
             wl_local = wl_cuticle - search_top     # W/L estimate as a local idx
             cands = [i for i in range(len(grad))
-                     if valid[i] and abs(grad[i]) >= 0.5]
+                     if valid[i] and abs(grad[i]) >= 0.5
+                     and _in_guide(search_top + i)]
             if cands:
                 best_idx = min(cands, key=lambda i: abs(i - wl_local))
                 cuticle_y = search_top + best_idx
+                grad_ok = True
                 sign = "drop" if grad[best_idx] < 0 else "rise"
                 print(f"  [Cuticle] gradient: y={cuticle_y} "
                       f"(L {sign}={grad[best_idx]:+.2f}, "
                       f"length={(cuticle_y-tip_y)*mpp:.1f}mm, "
                       f"W/L baseline={(wl_cuticle-tip_y)*mpp:.1f}mm)")
             else:
-                print(f"  [Cuticle] W/L fallback (no strong transition): "
-                      f"y={wl_cuticle}  length={(wl_cuticle-tip_y)*mpp:.1f}mm")
+                print(f"  [Cuticle] W/L fallback (no strong transition"
+                      f"{' in guide window' if guide_y is not None else ''}): "
+                      f"y={cuticle_y}  length={(cuticle_y-tip_y)*mpp:.1f}mm")
         else:
             print(f"  [Cuticle] W/L fallback (sparse): "
                   f"{w_mm_est:.1f}mm / 0.91 = {w_mm_est/0.91:.1f}mm")
@@ -1041,14 +1174,172 @@ def measure_top(image: np.ndarray, mpp: float,
         print(f"  [Cuticle] W/L estimate: {w_mm_est:.1f}mm / 0.91 "
               f"= {w_mm_est/0.91:.1f}mm")
 
-    # Colour (a* minimum + b* rise) overrides the L-gradient / W-L result.  It
-    # does not depend on light direction, and unlike the 0.91 prior it does not
-    # assume a population-average nail shape.
-    if _cut_color is not None:
+    # Colour (a* minimum + b* rise) normally beats both the L-gradient and the
+    # 0.91 prior: it does not depend on light direction, and it does not assume a
+    # population-average nail shape.  But its signature is NOT unique to the
+    # cuticle — the transverse creases on the fingertip pad produce the same
+    # a*-minimum-then-b*-rise, and when one falls inside the search window it can
+    # outscore the real cuticle.  It used to override unconditionally, which threw
+    # away correct gradient answers.  Two guards, both measured on the 2026-08-10
+    # five-finger set (colour error vs calipers in brackets):
+    #
+    #   • ENVELOPE — plate length in units of measured width runs 1.072-1.453
+    #     across all seven reference photos, so a candidate past ~1.45 is outside
+    #     every validated case.  pinky implied 1.67 and was a pad crease [+7.0mm].
+    #   • AGREEMENT — colour was validated to ±0.81mm, so two sound estimates
+    #     should land within ~2x that of each other.  A wider gap means one of
+    #     them latched onto the wrong feature, and it is colour that wanders, and
+    #     always downward onto a crease.  middle disagreed by 2.6mm [+3.8mm];
+    #     thumb and index agreed within 1.1mm and colour was the better of the two
+    #     there [-0.4 / +3.1mm], so the tolerance has to keep those.
+    #
+    # Only a REAL gradient detection may veto colour.  The W/L fallback may not:
+    # that prior was -3.6mm off on the reference photos, far worse than colour, so
+    # letting it win would regress the very cases colour was introduced for.
+    #
+    # Tried raising CUT_PLATE_RATIO_MAX (2026-08-15) to admit a real long
+    # middle finger measured at ratio 1.67. Reverted: the false positive this
+    # cap exists to reject (a pinky pad crease) ALSO implied ~1.67, and
+    # "confirmed by gradient" was not a safe tiebreaker either — on the actual
+    # photos, gradient and colour agreed on the SAME wrong pad crease for
+    # index/thumb/pinky just as often as they would have agreed on a real long
+    # cuticle, because both signals key off the same transverse-crease
+    # brightness/colour pattern. Left at 1.45: correct on every finger tested
+    # 2026-08-15 except the one long-nail case.
+    # Tightened 1.45->1.40 (2026-08-16): on a second hand (Seunghee, right
+    # hand) lunula-min latched onto a pad crease on index at ratio 1.42 —
+    # just under the old 1.45 cap, so the existing envelope guard (added
+    # the same day to also cover lunula-min, not just colour) didn't catch
+    # it. 1.40 sits between that bad case and the highest ratio among all
+    # CURRENTLY-ACCEPTED answers in the 2026-08-15 reference set (1.358,
+    # middle_v2) — re-verified against the full 11-photo set below with no
+    # regressions. Still below the known unresolved long-nail case (ratio
+    # 1.67, see the reverted 2026-08-15 attempt above) — that case remains
+    # unhandled either way, tightening here doesn't newly break it.
+    CUT_PLATE_RATIO_MAX = 1.40   # reference-photo envelope, see above
+    CUT_AGREE_TOL_MM    = 1.6    # 2x colour's validated ±0.81mm
+    if _cut_color is not None and guide_y is not None:
+        # Already passed the guide-line check above (otherwise it would have
+        # been set to None) — that is direct evidence from this specific
+        # photo, stronger than the population-ratio checks below, so it wins
+        # outright instead of also having to clear them. This is what lets a
+        # genuinely long nail (high ratio, previously indistinguishable from
+        # a pad crease by ratio alone) through when the operator physically
+        # confirmed it via the guide line.
         print(f"  [Cuticle] colour: y={_cut_color} "
-              f"(length={(_cut_color-tip_y)*mpp:.1f}mm) "
+              f"(length={(_cut_color-tip_y)*mpp:.1f}mm) [guide-confirmed] "
               f"[was y={cuticle_y}, {(cuticle_y-tip_y)*mpp:.1f}mm]")
         cuticle_y = _cut_color
+    elif _cut_color is not None:
+        # Envelope is checked against the TOTAL length (tip_y, including any
+        # detected free-edge extension) rather than just the fy-to-cuticle
+        # plate segment (changed 2026-08-16). Plate-only ratios can look
+        # individually plausible while the free edge adds enough on top to
+        # make the actual full candidate implausible — that's exactly what
+        # let a bad lunula-min answer for Seunghee's index slip past the
+        # plate-only version of this same check (plate ratio 1.19, but the
+        # real total length/width the candidate implies was 1.42).
+        plate_ratio = (_cut_color - tip_y) * mpp / w_mm_est
+        disagree_mm = abs(_cut_color - cuticle_y) * mpp
+        if plate_ratio > CUT_PLATE_RATIO_MAX:
+            print(f"  [Cuticle] colour REJECTED (envelope): y={_cut_color} "
+                  f"implies plate L/W={plate_ratio:.2f} > {CUT_PLATE_RATIO_MAX} "
+                  f"— likely a fingertip crease; keeping y={cuticle_y}, "
+                  f"{(cuticle_y-tip_y)*mpp:.1f}mm")
+        elif grad_ok and disagree_mm > CUT_AGREE_TOL_MM:
+            print(f"  [Cuticle] colour REJECTED (disagreement): y={_cut_color} "
+                  f"({(_cut_color-tip_y)*mpp:.1f}mm) is {disagree_mm:.1f}mm from "
+                  f"the gradient answer > {CUT_AGREE_TOL_MM}mm; keeping gradient "
+                  f"y={cuticle_y}, {(cuticle_y-tip_y)*mpp:.1f}mm")
+        else:
+            print(f"  [Cuticle] colour: y={_cut_color} "
+                  f"(length={(_cut_color-tip_y)*mpp:.1f}mm) "
+                  f"[was y={cuticle_y}, {(cuticle_y-tip_y)*mpp:.1f}mm]")
+            cuticle_y = _cut_color
+
+    # Tried a TEXTURE-anisotropy last resort (2026-08-15): the nail plate is
+    # horizontal-gradient-dominant (fine ridges/curvature across it) while
+    # skin past the cuticle is vertical-gradient-dominant (fingerprint,
+    # transverse creases), so log(Ex/Ey) does mark a real, measurable nail/
+    # skin boundary. Reverted: gating it to only fire when cuticle_y == the
+    # bare W/L prior (no real colour/gradient evidence) cannot separate "no
+    # evidence, wrong" from "no evidence, but this nail's true ratio is just
+    # close to 0.91" — ring hit that exact gap=0.000mm signature and was
+    # CORRECT (756, 9.9mm, confirmed against the photo), while middle hit the
+    # identical signature and was wrong (669, 11.0mm; true 722, 16.6mm). Any
+    # gate built on this pipeline's own signals fires identically on both, so
+    # auto-correcting on it silently breaks the correct case exactly as often
+    # as it fixes the wrong one. The texture signal itself was also only
+    # accurate to ~1.5-6mm depending on the finger (worst on ring/pinky,
+    # where a smooth proximal-fold strip below the true cuticle echoes the
+    # nail's signature for a few more mm) — not precise enough to trust even
+    # with a perfect gate.
+    #
+    # Second, independent opinion (see detect_cuticle_by_lunula_min). Its own
+    # per-frame confidence does not predict when it is right (gating a
+    # warning on disagreement with the primary answer fired on nearly every
+    # frame), but AGGREGATE accuracy against real caliper ground truth (wj's
+    # left hand, 19 captures across 4 sessions, 2026-08-15) is decisive and
+    # consistent by finger:
+    #   thumb : primary right (mean err -0.35mm), alt worse (-1.35mm)
+    #   index/middle/ring/pinky : primary badly short (-1.4 to -5.1mm,
+    #     worst on ring), alt close (-1.9 to +0.4mm) on EVERY finger EVERY
+    #     session tested.
+    # So alt replaces the primary answer on every finger except thumb, where
+    # the existing gradient/colour pipeline is already the more accurate
+    # signal. This is validated on one hand only — if it stops holding on
+    # other hands (the exam-day test set), narrow or drop this set rather
+    # than re-deriving thresholds from a second single-hand sample.
+    ACCEPT_ALT_CUTICLE_FOR = {"index", "middle", "ring", "pinky"}
+    _cut_alt = detect_cuticle_by_lunula_min(image, tip_x, tip_y, mpp)
+    if _cut_alt is not None and not _in_guide(_cut_alt):
+        print(f"  [Cuticle] lunula-min REJECTED (guide line): y={_cut_alt} "
+              f"is {abs(_cut_alt-guide_y)*mpp:.1f}mm from the guide row "
+              f"> {guide_tol_mm}mm")
+        _cut_alt = None
+    if finger in ACCEPT_ALT_CUTICLE_FOR and _cut_alt is not None:
+        # Same plausibility guard already applied to the colour detector
+        # above (envelope from the reference-photo set) — lunula-min was
+        # validated on one hand only (see comment above) and on a different
+        # hand/lighting it can latch onto a pad crease past the true
+        # cuticle just like colour does. Previously this override had no
+        # check at all, so a bad answer here couldn't be caught even though
+        # the exact same bad answer from colour, moments earlier, was
+        # correctly rejected by this envelope.
+        _alt_plate_ratio = (_cut_alt - tip_y) * mpp / w_mm_est
+        if guide_y is not None:
+            # Already guide-confirmed above — same override reasoning as
+            # colour's guide-confirmed branch.
+            print(f"  [Cuticle] using lunula-min second opinion for {finger}: "
+                  f"y={_cut_alt} (length={(_cut_alt-tip_y)*mpp:.1f}mm) "
+                  f"[guide-confirmed] [primary was y={cuticle_y}, "
+                  f"{(cuticle_y-tip_y)*mpp:.1f}mm]")
+            cuticle_y = _cut_alt
+        elif _alt_plate_ratio > CUT_PLATE_RATIO_MAX:
+            print(f"  [Cuticle] lunula-min REJECTED (envelope): y={_cut_alt} "
+                  f"implies plate L/W={_alt_plate_ratio:.2f} > {CUT_PLATE_RATIO_MAX} "
+                  f"— likely a pad crease; keeping y={cuticle_y}, "
+                  f"{(cuticle_y-tip_y)*mpp:.1f}mm")
+        else:
+            print(f"  [Cuticle] using lunula-min second opinion for {finger}: "
+                  f"y={_cut_alt} (length={(_cut_alt-tip_y)*mpp:.1f}mm) "
+                  f"[primary was y={cuticle_y}, {(cuticle_y-tip_y)*mpp:.1f}mm]")
+            cuticle_y = _cut_alt
+
+    # What IS safe when the alt override above did NOT apply (thumb, or
+    # alt found nothing): surface the ambiguity instead of silently
+    # resolving it. cuticle_y landing exactly on the bare prior means no
+    # independent evidence was found either way, so flag it for the human
+    # operator who is already looking at the photo and can judge it in a
+    # way this pipeline cannot.
+    cuticle_unverified = (finger not in ACCEPT_ALT_CUTICLE_FOR
+                          and abs(cuticle_y - wl_cuticle) * mpp < 0.15)
+    if cuticle_unverified:
+        print(f"  [Cuticle] UNVERIFIED: y={cuticle_y} "
+              f"(length={(cuticle_y-tip_y)*mpp:.1f}mm) sits exactly on the "
+              f"bare W/L prior — neither colour nor gradient found "
+              f"independent evidence for this position. Check the overlay "
+              f"against the photo before accepting.")
 
     cut_idx   = min(cuticle_y - tip_y, len(widths)-1)
     length_px = float(cuticle_y - tip_y)
@@ -1168,35 +1459,93 @@ def measure_top(image: np.ndarray, mpp: float,
         left_arr  = np.array(left_arr, float)
         right_arr = np.array(right_arr, float)
 
-        # Smooth the side edges to remove pixel jaggedness from the background-
-        # subtracted free edge AND to blend the free-edge/body join into one
-        # continuous curve — but PROTECT the tip (top rows where the two sides
-        # converge) so the almond point stays sharp.
-        tip_protect = min(n_pts, max(2, int(2.5 / mpp)))
-        win = max(3, (int(2.0 / mpp) | 1))
-        if n_pts > tip_protect + 3:
-            left_arr[tip_protect:]  = uniform_filter1d(left_arr[tip_protect:],  win)
-            right_arr[tip_protect:] = uniform_filter1d(right_arr[tip_protect:], win)
+        # ── Regularize into a clean, printable outline ──
+        # Raw per-row detection (background-subtracted free edge, lateral
+        # fold edges) carries pixel-level noise that traces faithfully but
+        # prints as a visibly rough/wavy wall — and it can be inconsistent
+        # frame to frame even for the same nail. A real fingernail's sides
+        # run close to straight AND parallel over the body — a constant
+        # width, on a centreline that can still be tilted (the finger is
+        # rarely dead-vertical in frame) — and its free edge is close to
+        # round for ~99% of people. So: fit a robust line to the CENTRE
+        # (not each side independently) and a single robust constant width,
+        # and rebuild the free-edge zone as a round taper anchored to that
+        # fit's width/centre at the join — instead of following every small
+        # wiggle from the raw per-row detection, and instead of letting one
+        # side's sparser/noisier detections pull the two sides out of
+        # parallel.
+        rows_all = tip_y + np.arange(n_pts)
+
+        def _robust_line(rows, vals):
+            coef = np.polyfit(rows, vals, 1)
+            resid = vals - np.polyval(coef, rows)
+            mad = np.median(np.abs(resid - np.median(resid))) + 1e-6
+            keep = np.abs(resid) < 3.5 * mad
+            if keep.sum() >= 4:
+                coef = np.polyfit(rows[keep], vals[keep], 1)
+            return coef
+
+        body_rows    = rows_all[n_free:]
+        join_row     = tip_y + n_free
+        center_slope = 0.0
+        join_half_w, join_center = float(body_half), float(join_cx)
+        if len(body_rows) >= 4:
+            center_body = (left_arr[n_free:] + right_arr[n_free:]) / 2.0
+            width_body  = right_arr[n_free:] - left_arr[n_free:]
+            c_coef = _robust_line(body_rows, center_body)
+
+            # Constant width: a single robust estimate (median, with the same
+            # outlier rejection as _robust_line) rather than a per-side fit —
+            # this also keeps one side's sparse/noisy detections (e.g. a
+            # lopsided lateral-fold read, few inliers on one side) from
+            # pulling the two sides out of parallel or skewing the width.
+            w_med  = np.median(width_body)
+            w_mad  = np.median(np.abs(width_body - w_med)) + 1e-6
+            w_keep = np.abs(width_body - w_med) < 3.5 * w_mad
+            body_width = float(np.median(width_body[w_keep])) if w_keep.sum() >= 4 else float(w_med)
+
+            center_line = np.polyval(c_coef, body_rows)
+            left_arr[n_free:]  = center_line - body_width / 2.0
+            right_arr[n_free:] = center_line + body_width / 2.0
+            center_slope = float(c_coef[0])
+            join_half_w  = body_width / 2.0
+            join_center  = float(np.polyval(c_coef, join_row))
+
+        if n_free > 2:
+            for i in range(n_free):
+                t = (n_free - i) / float(n_free)          # 1 at apex -> ~0 at join
+                half_w = join_half_w * float(np.sqrt(max(1.0 - t * t, 0.0)))
+                cx = join_center + center_slope * (rows_all[i] - join_row)
+                left_arr[i]  = cx - half_w
+                right_arr[i] = cx + half_w
 
         left_pts  = [[int(round(left_arr[i])),  tip_y + i] for i in range(n_pts)]
         right_pts = [[int(round(right_arr[i])), tip_y + i] for i in range(n_pts)]
 
-        # Cuticle arc — centred on the (re-anchored) nail axis at the cuticle row
-        # Anchor it to the measured fold edges there when we have them, so the
-        # arc meets the sides instead of stepping in/out from them.
-        if cuticle_y in lateral:
-            _lx, _rx = lateral[cuticle_y]
-            cuticle_cx = int(round((_lx + _rx) / 2.0))
-            arc_w      = (_rx - _lx) / 2.0
-        else:
-            cuticle_cx = int(round(nail_centers.get(cuticle_y, tip_x) + axis_shift))
-            arc_w      = body_half
+        # Cuticle arc — anchored to the FITTED body line's own endpoint (last
+        # row), not a separately-derived centre/width, so the arc always
+        # meets the sides exactly instead of stepping or self-crossing.
+        cuticle_cx = (left_arr[-1] + right_arr[-1]) / 2.0
+        arc_w      = (right_arr[-1] - left_arr[-1]) / 2.0
         arc_h       = arc_w * 0.28
+        # Path order is right_pts -> cuticle_arc -> reversed(left_pts), so the
+        # arc must START at the right side (angle=0) and END at the left side
+        # (angle=pi) to hand off cleanly. cos(angle) here (not -cos) does
+        # that: ax=cx+arc_w at angle=0 (right), ax=cx-arc_w at angle=pi
+        # (left). The previous sign started at the left instead, making the
+        # outline jump across the full width before the arc curved back —
+        # a self-crossing "bowtie" at the cuticle end, independent of any
+        # noise in the traced data.
+        # Sign on the ay term: a real nail plate is LONGER at the centre and
+        # SHORTER at the sides (the cuticle line recedes toward the hand in
+        # the middle, and comes up closer to the free edge at the two
+        # corners) — so the centre needs the LARGER y (further from the
+        # tip), not smaller. +sin, not -sin.
         cuticle_arc = []
         for i in range(41):
             angle = np.pi * i / 40
-            ax = cuticle_cx - arc_w * np.cos(angle)
-            ay = cuticle_y  - arc_h * np.sin(angle)
+            ax = cuticle_cx + arc_w * np.cos(angle)
+            ay = cuticle_y  + arc_h * np.sin(angle)
             cuticle_arc.append([int(ax), int(ay)])
 
         # No separate tip_arc: per-row edges already taper to a point at tip_y.
@@ -1241,6 +1590,14 @@ def measure_top(image: np.ndarray, mpp: float,
     # Prefer the MEASURED fold-to-fold width (side-lit photos).  The nail is
     # widest near the free edge and narrows toward the cuticle, so report the
     # widest measured row — that is the dimension a tip has to cover.
+    # (Tried MAD-based outlier rejection on the row widths here 2026-08-16,
+    # to fix a case with a lopsided/sparse one-sided fold read — reverted:
+    # width genuinely trends across rows (real taper, not noise), so a
+    # symmetric outlier test just discards the legitimately-widest rows.
+    # Regressed 3 reference fingers and didn't even fix the case it targeted,
+    # since that case's bias was systematic across all left-side rows, not a
+    # few outlier ones. See the lopsided-inlier-count problem instead if this
+    # needs solving again.)
     if lateral:
         half_px = max(rx - lx for lx, rx in lateral.values()) / 2.0
     else:
@@ -1253,12 +1610,15 @@ def measure_top(image: np.ndarray, mpp: float,
         "width_source":    "lateral_folds" if lateral else "constant_half",
         "length_mm":       l_mm,
         "skin_tone_hex":   hex_color,
+        "mpp_mm_per_px":   round(float(mpp), 6),
         "nail_polygon_px": smooth.tolist(),
         **cc_data,
         "_nail_half":      nail_half,
         "_tip_x":          tip_x,
         "_tip_y":          tip_y,
         "_cuticle_y":      cuticle_y,
+        "_cuticle_unverified": cuticle_unverified,
+        "_cuticle_y_alt":  _cut_alt,
         "_plate_start":    plate_start,
         "_lateral_rows":   _lateral_rows,
         "_lateral_span":   _lateral_span,
@@ -1324,6 +1684,22 @@ def draw_annotated(image, data, aruco_corners, finger):
              (tip_x+int(nail_half), cuticle_y),
              (0,165,255), 2)
 
+    # Second opinion (see detect_cuticle_by_lunula_min): drawn as a dashed
+    # cyan line whenever it's far enough from the primary line to be worth
+    # comparing. Never auto-selected — see measure_top for why neither
+    # signal's own confidence can be trusted to pick between them. The
+    # operator looking at the real photo is the tiebreaker.
+    cuticle_y_alt = data.get("_cuticle_y_alt")
+    if cuticle_y_alt is not None and abs(cuticle_y_alt - cuticle_y) > 5:
+        xl, xr = tip_x - int(nail_half), tip_x + int(nail_half)
+        for x in range(xl, xr, 14):
+            cv2.line(vis, (x, cuticle_y_alt), (min(x + 7, xr), cuticle_y_alt),
+                     (255, 255, 0), 2)
+        cv2.putText(vis, "alt?", (xr + 6, cuticle_y_alt + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 4)
+        cv2.putText(vis, "alt?", (xr + 6, cuticle_y_alt + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 1)
+
     # C-curve scan lines
     length_px = cuticle_y - tip_y
     scan_colors = [(255,100,0),(0,255,100),(255,0,255)]
@@ -1387,7 +1763,7 @@ def measure_finger(top_path: str, finger: str,
 
     print(f"\n[2/3] Nail measurement + C-curve …")
     data = measure_top(top_img, mpp, finger_mask, bbox,
-                       aruco_corners=aruco_corners)
+                       aruco_corners=aruco_corners, finger=finger)
 
     # ── Override C-curve with end-on measurement if photo is provided ──
     use_endon = (ccurve_path and os.path.isfile(ccurve_path)
@@ -1510,9 +1886,11 @@ def build_profile(results: list) -> list:
     """
     For each measured finger return a small profile dict with:
       - finger name
-      - nail_size: per-finger size classification relative to Asian women
-                   standard (much_smaller / smaller / average / larger /
-                   much_larger)
+      - width_vs_avg_mm / length_vs_avg_mm: measured minus the Korean-women
+                   reference mean for that finger (STANDARD_NAILS)
+      - nail_size: overall size classification relative to that standard,
+                   based on the mean of the width/length z-scores
+                   (much_smaller / smaller / average / larger / much_larger)
       - skin_tone: hex colour sampled from the skin ring around the nail
     """
     profiles = []
@@ -1521,14 +1899,16 @@ def build_profile(results: list) -> list:
         std    = STANDARD_NAILS.get(finger)
         if std is None:
             continue
-        w      = r["width_mm"]
-        l      = r.get("corrected_length_mm") or r["length_mm"]
-        w_cat  = _size_category(w - std["width_mm"])
-        l_cat  = _size_category(l - std["length_mm"])
+        w    = r["width_mm"]
+        l    = r.get("corrected_length_mm") or r["length_mm"]
+        w_z  = (w - std["width_mm"]) / std["width_sd"]
+        l_z  = (l - std["length_mm"]) / std["length_sd"]
         profiles.append({
-            "finger":    finger,
-            "nail_size": _overall_size(w_cat, l_cat),
-            "skin_tone": r.get("skin_tone_hex", "#FFFFFF"),
+            "finger":           finger,
+            "width_vs_avg_mm":  round(w - std["width_mm"], 2),
+            "length_vs_avg_mm": round(l - std["length_mm"], 2),
+            "nail_size":        _size_category((w_z + l_z) / 2.0),
+            "skin_tone":        r.get("skin_tone_hex", "#FFFFFF"),
         })
     return profiles
 
